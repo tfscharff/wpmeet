@@ -8,7 +8,7 @@ Single-file WordPress plugin (`mcw-meet-a-librarian.php`) for Wheaton College's 
 
 To check syntax locally: `php -l mcw-meet-a-librarian.php`. Everything else has to be tested manually on a WordPress install.
 
-The plugin version is set only in the `Version:` plugin header.
+The plugin version is set only in the `Version:` plugin header and follows semantic versioning. Bump it in every commit that changes the plugin: PATCH for bug and accessibility fixes, MINOR for new backward-compatible features, MAJOR for breaking changes (for example, changes to the shortcode, the REST routes, or the stored option or post-meta shape).
 
 ## Architecture
 

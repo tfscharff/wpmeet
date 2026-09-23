@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       MCW Meet With a Librarian
  * Description:        No-code "Meet With a Librarian" directory: staff manage librarians and their Google appointment booking links under Meet With a Librarian in wp-admin and click Save. Show the directory anywhere with the [meet_a_librarian] shortcode. Replaces LibCal appointments.
- * Version:           1.2.0
+ * Version:           1.2.1
  * Author:            Madeleine Clark Wallace Library
  * License:           GPL-2.0+
  * Requires at least: 5.6
@@ -632,7 +632,8 @@ function render(list){
   var html='<div class="mcw-lib__grid">';
   LIST.forEach(function(l,i){
     var name=esc(l.name)+(l.pronouns?' ('+esc(l.pronouns)+')':'');
-    var img=l.photo?'<img src="'+esc(l.photo)+'" alt="'+esc(l.name)+'’s picture" width="180" height="180" loading="lazy">':'';
+    var alt=l.profile?esc(l.name)+'’s profile':'';
+    var img=l.photo?'<img src="'+esc(l.photo)+'" alt="'+alt+'" width="180" height="180" loading="lazy">':'';
     var photo=l.profile?'<a href="'+esc(l.profile)+'">'+img+'</a>':img;
     var sub='';
     if(l.title)sub+='<div class="mcw-lib__title">'+esc(l.title)+'</div>';
