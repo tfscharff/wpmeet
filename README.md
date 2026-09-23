@@ -1,4 +1,4 @@
-# wpmeet — MCW Meet With a Librarian
+# wpmeet — Meet With a Librarian
 
 No-code WordPress plugin for a "Meet With a Librarian" directory. Staff manage librarians
 and their Google appointment-booking links under **Meet With a Librarian** in wp-admin;
