@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Meet With a Librarian
  * Description:        No-code "Meet With a Librarian" directory: staff manage librarians and their Google appointment booking links under Meet With a Librarian in wp-admin and click Save. Show the directory anywhere with the [meet_a_librarian] shortcode. Replaces LibCal appointments.
- * Version:           2.1.0
+ * Version:           2.2.0
  * Author:            Madeleine Clark Wallace Library
  * License:           GPL-2.0+
  * Requires at least: 5.6
@@ -66,9 +66,8 @@ function meetlib_slug( $name ) {
 /** The patron questions — defined once, identical for every librarian. */
 function meetlib_form_fields() {
 	return array(
-		array( 'key' => 'first',   'label' => 'First name',                                    'type' => 'text',     'required' => true,  'help' => '' ),
-		array( 'key' => 'last',    'label' => 'Last name',                                     'type' => 'text',     'required' => true,  'help' => '' ),
-		array( 'key' => 'email',   'label' => 'Email',                                         'type' => 'email',    'required' => true,  'help' => 'Use your wheatoncollege.edu or wheatonma.edu address — the same one you used to book your time.' ),
+		// Name is not asked: Google's booking form already collects it. Email is kept to match the booking.
+		array( 'key' => 'email',   'label' => 'Your email',                                    'type' => 'email',    'required' => true,  'help' => 'The wheatoncollege.edu or wheatonma.edu address you booked with, so your answers attach to your appointment.' ),
 		array( 'key' => 'help',    'label' => 'How can I help you?',                           'type' => 'textarea', 'required' => true,  'help' => '' ),
 		array( 'key' => 'course',  'label' => 'Is this related to a course? If so, which one?', 'type' => 'text',     'required' => true,  'help' => '' ),
 		array( 'key' => 'due',     'label' => 'If related to a course, when is the assignment due?', 'type' => 'text', 'required' => false, 'help' => '' ),
@@ -268,8 +267,6 @@ function meetlib_handle_request( WP_REST_Request $req ) {
 
 	// 3. Collect + sanitize text answers.
 	$data = array(
-		'first'   => sanitize_text_field( (string) $req->get_param( 'first' ) ),
-		'last'    => sanitize_text_field( (string) $req->get_param( 'last' ) ),
 		'email'   => sanitize_email( (string) $req->get_param( 'email' ) ),
 		'help'    => sanitize_textarea_field( (string) $req->get_param( 'help' ) ),
 		'course'  => sanitize_text_field( (string) $req->get_param( 'course' ) ),
@@ -323,13 +320,13 @@ function meetlib_handle_request( WP_REST_Request $req ) {
 	$post_id = wp_insert_post( array(
 		'post_type'   => MEETLIB_CPT,
 		'post_status' => 'publish',
-		'post_title'  => $data['first'] . ' ' . $data['last'] . ' — ' . $lib['name'],
+		'post_title'  => $data['email'] . ' — ' . $lib['name'],
 	), true );
 	if ( is_wp_error( $post_id ) ) {
 		return new WP_Error( 'meetlib_save', 'Something went wrong. Please email the librarian directly.', array( 'status' => 500 ) );
 	}
 	$meta = array(
-		'_meetlib_first' => $data['first'], '_meetlib_last' => $data['last'], '_meetlib_email' => $data['email'],
+		'_meetlib_email' => $data['email'],
 		'_meetlib_help' => $data['help'], '_meetlib_course' => $data['course'], '_meetlib_due' => $data['due'],
 		'_meetlib_meeting' => $data['meeting'], '_meetlib_librarian' => $lib['name'], '_meetlib_attach_url' => $attach_url,
 	);
@@ -365,9 +362,9 @@ function meetlib_notify( $lib, $data, $attach_url, $gcal = 'off' ) {
 		error_log( 'meet-a-librarian: no email for librarian "' . $lib['name'] . '"; request stored as CPT only.' );
 		return;
 	}
-	$subject = 'Appointment request — ' . $data['first'] . ' ' . $data['last'];
+	$subject = 'Appointment request — ' . $data['email'];
 	$lines   = array(
-		'From: ' . $data['first'] . ' ' . $data['last'] . ' <' . $data['email'] . '>',
+		'From: ' . $data['email'] . ' (their name is on the Google booking)',
 		'',
 		'How can I help you?',
 		$data['help'],
@@ -384,7 +381,7 @@ function meetlib_notify( $lib, $data, $attach_url, $gcal = 'off' ) {
 	} elseif ( 'pending' === $gcal ) {
 		$lines[] = 'No matching appointment was on your calendar yet; the plugin will look again in about 15 minutes.';
 	}
-	$headers = array( 'Reply-To: ' . $data['first'] . ' ' . $data['last'] . ' <' . $data['email'] . '>' );
+	$headers = array( 'Reply-To: ' . $data['email'] );
 	if ( ! wp_mail( $to, $subject, implode( "\n", $lines ), $headers ) ) {
 		error_log( 'meet-a-librarian: wp_mail failed for request from ' . $data['email'] . '; stored as CPT.' );
 	}
@@ -493,7 +490,6 @@ function meetlib_gcal_events_path( $calendar_id ) {
 function meetlib_gcal_details_html( $data, $attach_url ) {
 	$none = '(none given)';
 	$rows = array(
-		'Name'                => trim( $data['first'] . ' ' . $data['last'] ),
 		'Email'               => $data['email'],
 		'How can I help you?' => $data['help'],
 		'Course'              => $data['course'],
@@ -571,7 +567,7 @@ function meetlib_gcal_retry( $post_id ) {
 	$post_id = (int) $post_id;
 	if ( MEETLIB_CPT !== get_post_type( $post_id ) || 'pending' !== get_post_meta( $post_id, '_meetlib_gcal', true ) ) { return; }
 	$data = array();
-	foreach ( array( 'first', 'last', 'email', 'help', 'course', 'due', 'meeting' ) as $k ) {
+	foreach ( array( 'email', 'help', 'course', 'due', 'meeting' ) as $k ) {
 		$data[ $k ] = (string) get_post_meta( $post_id, '_meetlib_' . $k, true );
 	}
 	$status = meetlib_gcal_annotate(
@@ -939,6 +935,8 @@ add_action( 'edit_form_after_title', function ( $post ) {
 	echo '<table class="widefat striped" style="max-width:780px;margin-top:12px"><tbody>';
 	foreach ( $rows as $label => $key ) {
 		$val = get_post_meta( $post->ID, $key, true );
+		// Name fields were dropped in 2.2 (Google's booking collects them); still shown for older records.
+		if ( '' === (string) $val && in_array( $key, array( '_meetlib_first', '_meetlib_last' ), true ) ) { continue; }
 		echo '<tr><th style="width:200px">' . esc_html( $label ) . '</th><td>' . nl2br( esc_html( $val ) ) . '</td></tr>';
 	}
 	$att = get_post_meta( $post->ID, '_meetlib_attach_url', true );
@@ -1021,6 +1019,7 @@ function meetlib_widget_markup() {
   #meetlib-form-host .meetlib-f__h:focus{outline:none}
   #meetlib-form-host iframe{width:100%;height:720px;border:1px solid var(--meetlib-line);border-radius:8px}
   #meetlib-form-host .meetlib-f__note{background:#eef4fb;border:1px solid #cfe0f2;border-radius:8px;padding:12px 14px;margin-bottom:16px}
+  #meetlib-form-host .meetlib-f__form{margin-top:28px;padding-top:20px;border-top:1px solid var(--meetlib-line)}
   #meetlib-form-host .meetlib-f__urgent{margin:12px 0 0;padding:10px 14px;border-left:4px solid var(--meetlib-accent);background:#f5f7fa}
   #meetlib-form-host .meetlib-f__alert{background:#fef3f2;border:1px solid #fecdca;color:#b42318;border-radius:8px;padding:12px 14px;margin-bottom:16px}
   #meetlib-form-host .meetlib-f__alert:empty{display:none}
@@ -1099,9 +1098,8 @@ function fieldHtml(f){
 }
 function focusEl(n){if(n){n.focus();if(n.scrollIntoView)n.scrollIntoView({behavior:"smooth",block:"start"});}}
 function close(){host.innerHTML="";if(opener&&document.body.contains(opener))opener.focus();}
-function showStep(n){byId("meetlib-step1").hidden=n!==1;byId("meetlib-step2").hidden=n!==2;focusEl(byId("meetlib-h"+n));}
-/* Step 1 = the librarian's Google scheduler; step 2 = the intake form. Both stay in the DOM so
-   going back to the calendar doesn't reload the iframe and lose the patron's place. */
+/* One screen: the librarian's Google scheduler with the short intake form directly under it.
+   The patron books in the iframe and sends the form in the same pass; there is no "I've booked" gate. */
 function openBooking(i){
   var l=LIST[i];if(!l)return;
   var embed=l.embed||"";
@@ -1112,28 +1110,24 @@ function openBooking(i){
     ? '<p class="meetlib-f__urgent">Need an appointment within the next 24 hours? Email <a href="mailto:'+esc(CFG.urgentEmail)+'">'+esc(CFG.urgentEmail)+'</a>.</p>'
     : '';
   host.innerHTML=
-     '<section id="meetlib-step1" aria-labelledby="meetlib-h1">'
-    +'<h2 class="meetlib-f__h" id="meetlib-h1" tabindex="-1">Step 1 of 2: Pick a time with '+esc(l.name)+'</h2>'
-    +'<p class="meetlib-f__note">Choose a date and time'+(embed?' below':'')+' and confirm your booking. Then continue to step 2 to tell '+esc(l.name)+' what you’d like help with.</p>'
+     '<section aria-labelledby="meetlib-h1">'
+    +'<h2 class="meetlib-f__h" id="meetlib-h1" tabindex="-1">Book an appointment with '+esc(l.name)+'</h2>'
+    +'<p class="meetlib-f__note">Pick a date and time'+(embed?' below':'')+', then use the short form underneath to tell '+esc(l.name)+' what you’d like help with.</p>'
     +cal+urgent
-    +'<div class="meetlib-f__actions"><button type="button" class="meetlib-f__submit" id="meetlib-next">I’ve booked my time — continue</button>'
-    +'<button type="button" class="meetlib-f__cancel" id="meetlib-cancel">Cancel</button></div>'
     +'</section>'
-    +'<section id="meetlib-step2" aria-labelledby="meetlib-h2" hidden>'
-    +'<h2 class="meetlib-f__h" id="meetlib-h2" tabindex="-1">Step 2 of 2: Tell '+esc(l.name)+' about your request</h2>'
-    +'<div id="meetlib-step2-body">'
+    +'<section class="meetlib-f__form" aria-labelledby="meetlib-h2">'
+    +'<h2 class="meetlib-f__h" id="meetlib-h2" tabindex="-1">Tell '+esc(l.name)+' what you need</h2>'
+    +'<div id="meetlib-form-body">'
     +'<div class="meetlib-f__alert" id="meetlib-alert" role="alert"></div>'
     +'<p class="meetlib-f__help">Fields marked with <span class="meetlib-f__req">*</span> are required.</p>'
     +'<form id="meetlib-f" novalidate>'+CFG.fields.map(fieldHtml).join("")
     +'<div aria-hidden="true" style="position:absolute;left:-9999px"><label>Leave this empty <input type="text" name="website" tabindex="-1" autocomplete="off"></label></div>'
-    +'<div class="meetlib-f__actions"><button type="submit" class="meetlib-f__submit">Send my details</button>'
-    +'<button type="button" class="meetlib-f__cancel" id="meetlib-back">Back to the calendar</button></div></form>'
+    +'<div class="meetlib-f__actions"><button type="submit" class="meetlib-f__submit">Send</button>'
+    +'<button type="button" class="meetlib-f__cancel" id="meetlib-cancel">Cancel</button></div></form>'
     +'</div></section>';
-  byId("meetlib-next").addEventListener("click",function(){showStep(2);});
   byId("meetlib-cancel").addEventListener("click",close);
-  byId("meetlib-back").addEventListener("click",function(){showStep(1);});
   byId("meetlib-f").addEventListener("submit",function(e){e.preventDefault();submitForm(i);});
-  showStep(1);
+  focusEl(byId("meetlib-h1"));
 }
 function getVal(k){var n=host.querySelector('[data-k="'+k+'"]');return n?n.value:"";}
 function getRadio(k){var n=host.querySelector('input[name="meetlib_'+k+'"]:checked');return n?n.value:"";}
@@ -1182,7 +1176,7 @@ function submitForm(i){
     if(!res.ok){throw new Error(res.j&&res.j.message?res.j.message:"Something went wrong sending your details.");}
     showDone(l,res.j);
   }).catch(function(err){
-    btn.disabled=false;btn.textContent="Send my details";
+    btn.disabled=false;btn.textContent="Send";
     var a=byId("meetlib-alert");
     a.innerHTML=esc(err.message)+' If this keeps happening, '
       +(l.email?'email <a href="mailto:'+esc(l.email)+'">'+esc(l.email)+'</a> directly.':'email the librarian directly.');
@@ -1191,13 +1185,12 @@ function submitForm(i){
 }
 function showDone(l,resp){
   var added=resp&&resp.calendar==="added";
-  byId("meetlib-h2").textContent="You’re all set";
-  byId("meetlib-step2-body").innerHTML='<p class="meetlib-f__note">Thanks! Your details were sent to <strong>'+esc(l.name)+'</strong>'
+  byId("meetlib-h2").textContent="Sent";
+  byId("meetlib-form-body").innerHTML='<p class="meetlib-f__note">Thanks! Your details were sent to <strong>'+esc(l.name)+'</strong>'
     +(added?' and added to your appointment on their calendar.':'.')
-    +' You’ll get a calendar invitation from Google for the time you booked.</p>'
-    +'<p>Haven’t booked a time yet? <button type="button" class="meetlib-f__cancel" id="meetlib-back2">Go back to the calendar</button></p>';
-  byId("meetlib-back2").addEventListener("click",function(){showStep(1);});
-  showStep(2);
+    +' Google will email you a confirmation for the time you booked.'
+    +(added?'':' Haven’t picked a time yet? Choose one above.')+'</p>';
+  focusEl(byId("meetlib-h2"));
 }
 })();
 </script>

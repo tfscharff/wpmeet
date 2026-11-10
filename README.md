@@ -6,8 +6,8 @@ display the directory anywhere with the `[meet_a_librarian]` shortcode. Replaces
 Appointments.
 
 - Per-librarian booking links and subject specialties
-- Patrons pick a time on the librarian's Google appointment schedule first, then fill in a
-  short intake form; the answers are emailed to the librarian and kept under
+- Patrons pick a time on the librarian's embedded Google appointment schedule and answer a few
+  short questions on the same screen; the answers are emailed to the librarian and kept under
   **Appointment Requests** in wp-admin
 - Optional Google Calendar integration adds the patron's answers to the booked event
 - Deep-linkable per-librarian widget for embedding elsewhere
