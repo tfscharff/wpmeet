@@ -9,7 +9,9 @@ Appointments.
 - Patrons answer a few short questions, then pick a time on the librarian's embedded Google
   appointment schedule on the same screen (the calendar unlocks once the questions are sent);
   the answers are emailed to the librarian and kept under **Appointment Requests** in wp-admin
-- Optional Google Calendar integration adds the patron's answers to the booked event
+- Optional Google Calendar integration adds the patron's answers to the booked event and holds
+  the librarian's email until the booking actually appears, so nobody is emailed about a
+  request that never became an appointment
 - Deep-linkable per-librarian widget for embedding elsewhere
 - No custom database tables — the roster lives in a WordPress option, requests in a private post type
 

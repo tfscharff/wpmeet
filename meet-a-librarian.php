@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Meet With a Librarian
  * Description:        No-code "Meet With a Librarian" directory: staff manage librarians and their Google appointment booking links under Meet With a Librarian in wp-admin and click Save. Show the directory anywhere with the [meet_a_librarian] shortcode. Replaces LibCal appointments.
- * Version:           2.3.0
+ * Version:           2.4.0
  * Author:            Madeleine Clark Wallace Library
  * License:           GPL-2.0+
  * Requires at least: 5.6
@@ -336,18 +336,24 @@ function meetlib_handle_request( WP_REST_Request $req ) {
 	//    The patron books AFTER sending the form, so this first look normally finds nothing;
 	//    the scheduled retries (meetlib_gcal_retry) pick the booking up once it exists.
 	$calendar = meetlib_librarian_email( $lib );
-	$gcal     = meetlib_gcal_annotate( $calendar, $data, $attach_url );
+	$when     = '';
+	$gcal     = meetlib_gcal_annotate( $calendar, $data, $attach_url, $when );
 	update_post_meta( $post_id, '_meetlib_calendar', $calendar );
+	update_post_meta( $post_id, '_meetlib_when', $when );
 	update_post_meta( $post_id, '_meetlib_gcal_tries', 0 );
-	if ( in_array( $gcal, array( 'not_found', 'error' ), true ) ) {
+	if ( 'not_found' === $gcal ) {
 		$delays = meetlib_gcal_retry_delays();
 		wp_schedule_single_event( time() + $delays[0], 'meetlib_gcal_retry', array( $post_id ) );
 		$gcal = 'pending';
 	}
 	update_post_meta( $post_id, '_meetlib_gcal', $gcal );
 
-	// 8. Email the librarian (best-effort; failure does not fail the request).
-	meetlib_notify( $lib, $data, $attach_url, $gcal );
+	// 8. Email the librarian (best-effort; failure does not fail the request). When the integration
+	//    is watching the calendar, hold the email until the booking appears so the librarian is never
+	//    told about a request that no appointment follows; meetlib_gcal_retry sends it then.
+	if ( 'pending' !== $gcal ) {
+		meetlib_notify( $post_id, $calendar, $lib['name'], $data, $attach_url, $gcal, $when );
+	}
 
 	// 9. Success. embedUrl/booking are kept for pages still running the 2.0 script from a cache.
 	return rest_ensure_response( array(
@@ -358,16 +364,36 @@ function meetlib_handle_request( WP_REST_Request $req ) {
 	) );
 }
 
-/** Email the librarian a formatted copy of the request. Skipped (with a log) if the librarian has no email on file. */
-function meetlib_notify( $lib, $data, $attach_url, $gcal = 'off' ) {
-	$to = meetlib_librarian_email( $lib );
+/**
+ * Email the librarian the request. Sent once per request (`_meetlib_notified`). The wording depends on
+ * what the plugin knows: `added` = booking found (includes the time); `not_found` = the integration
+ * watched for a day and no booking matched; anything else = no integration, so a booking is expected.
+ * Skipped (with a log) if the librarian has no email on file.
+ */
+function meetlib_notify( $post_id, $to, $lib_name, $data, $attach_url, $gcal, $when = '' ) {
 	if ( ! $to ) {
-		error_log( 'meet-a-librarian: no email for librarian "' . $lib['name'] . '"; request stored as CPT only.' );
+		error_log( 'meet-a-librarian: no email for librarian "' . $lib_name . '"; request stored as CPT only.' );
 		return;
 	}
-	$subject = 'Appointment request — ' . $data['email'];
-	$lines   = array(
-		'From: ' . $data['email'] . ' (their name is on the Google booking)',
+	if ( $post_id && get_post_meta( $post_id, '_meetlib_notified', true ) ) { return; }
+
+	if ( 'added' === $gcal && '' !== $when ) {
+		$subject = 'Appointment booked: ' . $when . ' — ' . $data['email'];
+		$intro   = array( 'Booked for: ' . $when, 'Patron: ' . $data['email'] . ' (their name is on the Google booking)' );
+		$outro   = array( 'These details are also in the appointment\'s description on your Google Calendar.' );
+	} elseif ( 'not_found' === $gcal ) {
+		$subject = 'Appointment request, no booking found — ' . $data['email'];
+		$intro   = array( 'Patron: ' . $data['email'] );
+		$outro   = array(
+			'This patron filled in the request form a day ago, but no matching booking has appeared on your calendar.',
+			'They may not have picked a time, or they may have booked with a different email address.',
+		);
+	} else {
+		$subject = 'Appointment request — ' . $data['email'];
+		$intro   = array( 'Patron: ' . $data['email'] . ' (their name is on the Google booking)' );
+		$outro   = array( 'The patron picks a time on your Google appointment page right after sending this; expect a booking shortly.' );
+	}
+	$lines = array_merge( $intro, array(
 		'',
 		'How can I help you?',
 		$data['help'],
@@ -377,15 +403,11 @@ function meetlib_notify( $lib, $data, $attach_url, $gcal = 'off' ) {
 		'Meeting preference: ' . $data['meeting'],
 		'Attachment: ' . ( $attach_url ? $attach_url : '(none)' ),
 		'',
-		'The patron picks a time on your Google appointment page right after sending this; expect a booking shortly.',
-	);
-	if ( 'added' === $gcal ) {
-		$lines[] = 'These details were also added to the appointment on your Google Calendar.';
-	} elseif ( 'pending' === $gcal ) {
-		$lines[] = 'Once the booking appears on your calendar, these details will be added to it automatically.';
-	}
+	), $outro );
 	$headers = array( 'Reply-To: ' . $data['email'] );
-	if ( ! wp_mail( $to, $subject, implode( "\n", $lines ), $headers ) ) {
+	if ( wp_mail( $to, $subject, implode( "\n", $lines ), $headers ) ) {
+		if ( $post_id ) { update_post_meta( $post_id, '_meetlib_notified', current_time( 'mysql' ) ); }
+	} else {
 		error_log( 'meet-a-librarian: wp_mail failed for request from ' . $data['email'] . '; stored as CPT.' );
 	}
 }
@@ -511,9 +533,10 @@ function meetlib_gcal_details_html( $data, $attach_url ) {
 
 /**
  * Find the patron's upcoming event on the librarian's calendar and append the answers.
- * Returns: added | not_found | error | no_calendar | off.
+ * Returns: added | not_found | error | no_calendar | off. On `added`, $when receives the
+ * appointment's start as readable local text (e.g. "Tuesday, November 11 at 2:00 pm").
  */
-function meetlib_gcal_annotate( $calendar_id, $data, $attach_url ) {
+function meetlib_gcal_annotate( $calendar_id, $data, $attach_url, &$when = '' ) {
 	if ( ! meetlib_gcal_enabled() ) { return 'off'; }
 	if ( '' === (string) $calendar_id ) { return 'no_calendar'; }
 
@@ -561,6 +584,13 @@ function meetlib_gcal_annotate( $calendar_id, $data, $attach_url ) {
 		error_log( 'meet-a-librarian: could not update event on ' . $calendar_id . ': ' . $patch->get_error_message() );
 		return 'error';
 	}
+	if ( ! empty( $best['start']['dateTime'] ) ) {
+		$ts   = strtotime( $best['start']['dateTime'] );
+		$when = $ts ? wp_date( 'l, F j \a\t g:i a', $ts ) : (string) $best['start']['dateTime'];
+	} elseif ( ! empty( $best['start']['date'] ) ) {
+		$ts   = strtotime( $best['start']['date'] );
+		$when = $ts ? wp_date( 'l, F j', $ts ) : (string) $best['start']['date'];
+	}
 	return 'added';
 }
 
@@ -569,7 +599,12 @@ function meetlib_gcal_retry_delays() {
 	return array( 5 * MINUTE_IN_SECONDS, 20 * MINUTE_IN_SECONDS, 2 * HOUR_IN_SECONDS, DAY_IN_SECONDS );
 }
 
-/** Scheduled retries (see meetlib_gcal_retry_delays) that annotate the booking once it exists. */
+/**
+ * Scheduled retries (see meetlib_gcal_retry_delays): annotate the booking once it exists, then send
+ * the held librarian email. If the delays run out with no match, the librarian gets a clearly
+ * labelled "no booking found" email instead, so answers aren't lost when a patron books with a
+ * different address.
+ */
 add_action( 'meetlib_gcal_retry', 'meetlib_gcal_retry', 10, 1 );
 function meetlib_gcal_retry( $post_id ) {
 	$post_id = (int) $post_id;
@@ -578,31 +613,33 @@ function meetlib_gcal_retry( $post_id ) {
 	foreach ( array( 'email', 'help', 'course', 'due', 'meeting' ) as $k ) {
 		$data[ $k ] = (string) get_post_meta( $post_id, '_meetlib_' . $k, true );
 	}
-	$status = meetlib_gcal_annotate(
-		(string) get_post_meta( $post_id, '_meetlib_calendar', true ),
-		$data,
-		(string) get_post_meta( $post_id, '_meetlib_attach_url', true )
-	);
-	$tries  = (int) get_post_meta( $post_id, '_meetlib_gcal_tries', true ) + 1;
-	$delays = meetlib_gcal_retry_delays();
+	$calendar = (string) get_post_meta( $post_id, '_meetlib_calendar', true );
+	$attach   = (string) get_post_meta( $post_id, '_meetlib_attach_url', true );
+	$when     = '';
+	$status   = meetlib_gcal_annotate( $calendar, $data, $attach, $when );
+	$tries    = (int) get_post_meta( $post_id, '_meetlib_gcal_tries', true ) + 1;
+	$delays   = meetlib_gcal_retry_delays();
 	update_post_meta( $post_id, '_meetlib_gcal_tries', $tries );
 	if ( in_array( $status, array( 'not_found', 'error' ), true ) && isset( $delays[ $tries ] ) ) {
 		// Delays are measured from the submission, so wait only the difference.
 		wp_schedule_single_event( time() + max( MINUTE_IN_SECONDS, $delays[ $tries ] - $delays[ $tries - 1 ] ), 'meetlib_gcal_retry', array( $post_id ) );
-		$status = 'pending';
+		update_post_meta( $post_id, '_meetlib_gcal', 'pending' );
+		return;
 	}
 	update_post_meta( $post_id, '_meetlib_gcal', $status );
+	update_post_meta( $post_id, '_meetlib_when', $when );
+	meetlib_notify( $post_id, $calendar, (string) get_post_meta( $post_id, '_meetlib_librarian', true ), $data, $attach, $status, $when );
 }
 
 /** Human-readable label for a request's `_meetlib_gcal` status. */
 function meetlib_gcal_status_label( $status ) {
 	$map = array(
-		'added'       => 'Added to the calendar event',
-		'pending'     => 'Waiting for the booking to appear on the calendar — checking again later',
-		'not_found'   => 'No matching booking found within a day — sent by email only',
-		'error'       => 'Calendar not reachable (not shared with the integration?) — sent by email only',
-		'no_calendar' => 'Librarian has no email on file — not added',
-		'off'         => 'Calendar integration off — sent by email only',
+		'added'       => 'Booking found; answers added to the event and the librarian emailed',
+		'pending'     => 'Waiting for the booking to appear on the calendar; the librarian is emailed once it does',
+		'not_found'   => 'No matching booking within a day; the librarian was emailed a "no booking found" note',
+		'error'       => 'Calendar not reachable (not shared with the integration?); emailed without waiting for a booking',
+		'no_calendar' => 'Librarian has no email on file; not added, no email sent',
+		'off'         => 'Calendar integration off; emailed without waiting for a booking',
 	);
 	return isset( $map[ $status ] ) ? $map[ $status ] : '';
 }
@@ -922,6 +959,7 @@ add_filter( 'manage_' . MEETLIB_CPT . '_posts_columns', function ( $cols ) {
 		'cb'            => isset( $cols['cb'] ) ? $cols['cb'] : '',
 		'title'         => 'Patron',
 		'meetlib_librarian' => 'Librarian',
+		'meetlib_when'      => 'Appointment',
 		'meetlib_meeting'   => 'Meeting',
 		'meetlib_email'     => 'Email',
 		'date'          => 'Submitted',
@@ -929,7 +967,7 @@ add_filter( 'manage_' . MEETLIB_CPT . '_posts_columns', function ( $cols ) {
 } );
 
 add_action( 'manage_' . MEETLIB_CPT . '_posts_custom_column', function ( $col, $post_id ) {
-	$map = array( 'meetlib_librarian' => '_meetlib_librarian', 'meetlib_meeting' => '_meetlib_meeting', 'meetlib_email' => '_meetlib_email' );
+	$map = array( 'meetlib_librarian' => '_meetlib_librarian', 'meetlib_when' => '_meetlib_when', 'meetlib_meeting' => '_meetlib_meeting', 'meetlib_email' => '_meetlib_email' );
 	if ( isset( $map[ $col ] ) ) {
 		echo esc_html( get_post_meta( $post_id, $map[ $col ], true ) );
 	}
@@ -947,6 +985,7 @@ add_action( 'edit_form_after_title', function ( $post ) {
 		'Course'             => '_meetlib_course',
 		'Assignment due'     => '_meetlib_due',
 		'Meeting preference' => '_meetlib_meeting',
+		'Appointment'        => '_meetlib_when',
 	);
 	echo '<table class="widefat striped" style="max-width:780px;margin-top:12px"><tbody>';
 	foreach ( $rows as $label => $key ) {
@@ -1217,8 +1256,8 @@ function showDone(l,resp){
   if(lock&&lock.parentNode)lock.parentNode.removeChild(lock);
   if(ctl){ctl.removeAttribute("tabindex");ctl.removeAttribute("aria-hidden");}
   byId("meetlib-h2").textContent="1. Sent ✓";
-  byId("meetlib-form-body").innerHTML='<p class="meetlib-f__note">Thanks! Your details were sent to <strong>'+esc(l.name)+'</strong>. '
-    +'Now pick your date and time'+(ctl&&ctl.tagName==="IFRAME"?' on the calendar':'')+'. Use the same email address when you book so your answers attach to the appointment.</p>';
+  byId("meetlib-form-body").innerHTML='<p class="meetlib-f__note">Thanks! Now pick your date and time'+(ctl&&ctl.tagName==="IFRAME"?' on the calendar':'')+'. '
+    +'Your answers reach <strong>'+esc(l.name)+'</strong> with your booking, so use the same email address when you book.</p>';
   focusEl(byId("meetlib-h3"));
 }
 })();
