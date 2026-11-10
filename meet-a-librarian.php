@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Meet With a Librarian
  * Description:        No-code "Meet With a Librarian" directory: staff manage librarians and their Google appointment booking links under Meet With a Librarian in wp-admin and click Save. Show the directory anywhere with the [meet_a_librarian] shortcode. Replaces LibCal appointments.
- * Version:           2.0.0
+ * Version:           2.1.0
  * Author:            Madeleine Clark Wallace Library
  * License:           GPL-2.0+
  * Requires at least: 5.6
@@ -15,6 +15,8 @@ define( 'MEETLIB_OPTION', 'meetlib_librarians' );
 define( 'MEETLIB_PAGE_OPTION', 'meetlib_page_url' );
 define( 'MEETLIB_CPT', 'meetlib_request' );
 define( 'MEETLIB_DB_VERSION', 2 );
+define( 'MEETLIB_GCAL_OPTION', 'meetlib_gcal_key' );
+define( 'MEETLIB_GCAL_MARKER', 'Meet With a Librarian request' );
 
 /**
  * One-time upgrade from 1.x, which stored everything under a legacy key prefix:
@@ -66,7 +68,7 @@ function meetlib_form_fields() {
 	return array(
 		array( 'key' => 'first',   'label' => 'First name',                                    'type' => 'text',     'required' => true,  'help' => '' ),
 		array( 'key' => 'last',    'label' => 'Last name',                                     'type' => 'text',     'required' => true,  'help' => '' ),
-		array( 'key' => 'email',   'label' => 'Email',                                         'type' => 'email',    'required' => true,  'help' => 'Use your wheatoncollege.edu or wheatonma.edu address.' ),
+		array( 'key' => 'email',   'label' => 'Email',                                         'type' => 'email',    'required' => true,  'help' => 'Use your wheatoncollege.edu or wheatonma.edu address — the same one you used to book your time.' ),
 		array( 'key' => 'help',    'label' => 'How can I help you?',                           'type' => 'textarea', 'required' => true,  'help' => '' ),
 		array( 'key' => 'course',  'label' => 'Is this related to a course? If so, which one?', 'type' => 'text',     'required' => true,  'help' => '' ),
 		array( 'key' => 'due',     'label' => 'If related to a course, when is the assignment due?', 'type' => 'text', 'required' => false, 'help' => '' ),
@@ -76,8 +78,37 @@ function meetlib_form_fields() {
 	);
 }
 
+/** A field definition from meetlib_form_fields() by key, or null. */
+function meetlib_field( $key ) {
+	foreach ( meetlib_form_fields() as $f ) {
+		if ( $f['key'] === $key ) { return $f; }
+	}
+	return null;
+}
+
 function meetlib_email_domains() { return array( 'wheatoncollege.edu', 'wheatonma.edu' ); }
-function meetlib_upload_exts()   { return array( 'pdf', 'doc', 'docx', 'txt', 'rtf', 'png', 'jpg', 'jpeg', 'gif' ); }
+
+/** Shown under the calendar: where to go when no slot is soon enough. */
+function meetlib_urgent_email() { return 'librarians_research@wheatoncollege.edu'; }
+
+/** Allowed attachment types (wp_handle_upload format). The extension list is derived from this. */
+function meetlib_upload_mimes() {
+	return array(
+		'pdf'      => 'application/pdf',
+		'doc'      => 'application/msword',
+		'docx'     => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+		'txt'      => 'text/plain',
+		'rtf'      => 'application/rtf',
+		'png'      => 'image/png',
+		'jpg|jpeg' => 'image/jpeg',
+		'gif'      => 'image/gif',
+	);
+}
+function meetlib_upload_exts() {
+	$out = array();
+	foreach ( array_keys( meetlib_upload_mimes() ) as $k ) { $out = array_merge( $out, explode( '|', $k ) ); }
+	return $out;
+}
 function meetlib_max_upload_bytes() { return 20 * 1024 * 1024; }
 
 /** Normalize a Google appointment-schedule link to its inline embed URL, or '' if not embeddable. */
@@ -135,6 +166,16 @@ function meetlib_get() {
 	return array_values( $v );
 }
 
+/** Roster as served by GET /librarians: stored fields plus the computed scheduler `embed` URL. */
+function meetlib_public_roster() {
+	$out = array();
+	foreach ( meetlib_get() as $lib ) {
+		$lib['embed'] = meetlib_embed_url( isset( $lib['booking'] ) ? $lib['booking'] : '' );
+		$out[]        = $lib;
+	}
+	return $out;
+}
+
 /** Whitelist + validate incoming rows so only clean data is stored. */
 function meetlib_sanitize( $in ) {
 	$out = array();
@@ -166,7 +207,7 @@ add_action( 'rest_api_init', function () {
 		array(
 			'methods'             => 'GET',
 			'callback'            => function () {
-				return rest_ensure_response( meetlib_get() );
+				return rest_ensure_response( meetlib_public_roster() );
 			},
 			'permission_callback' => '__return_true',
 		),
@@ -209,9 +250,17 @@ function meetlib_handle_request( WP_REST_Request $req ) {
 		return new WP_Error( 'meetlib_bot', 'Submission blocked.', array( 'status' => 400 ) );
 	}
 
-	// 2. Resolve the target librarian by roster index.
+	// 2. Resolve the target librarian by roster index, cross-checked against the name slug so a
+	//    roster edited while the patron had the page open can't route the request to someone else.
 	$libs = meetlib_get();
 	$idx  = (int) $req->get_param( 'librarian' );
+	$want = meetlib_slug( (string) $req->get_param( 'librarianSlug' ) );
+	if ( '' !== $want && ( ! isset( $libs[ $idx ] ) || meetlib_slug( $libs[ $idx ]['name'] ) !== $want ) ) {
+		$idx = -1;
+		foreach ( $libs as $j => $l ) {
+			if ( meetlib_slug( $l['name'] ) === $want ) { $idx = $j; break; }
+		}
+	}
 	if ( ! isset( $libs[ $idx ] ) || empty( $libs[ $idx ]['booking'] ) ) {
 		return new WP_Error( 'meetlib_unavailable', 'That librarian is not available for booking.', array( 'status' => 400 ) );
 	}
@@ -242,8 +291,8 @@ function meetlib_handle_request( WP_REST_Request $req ) {
 	if ( ! in_array( $domain, meetlib_email_domains(), true ) ) {
 		return new WP_Error( 'meetlib_domain', 'Please use your wheatoncollege.edu or wheatonma.edu email address.', array( 'status' => 400 ) );
 	}
-	$allowed_meetings = array( 'In person in my office', 'In person in a fully accessible space', 'On Zoom' );
-	if ( ! in_array( $data['meeting'], $allowed_meetings, true ) ) {
+	$meeting_field = meetlib_field( 'meeting' );
+	if ( ! $meeting_field || ! in_array( $data['meeting'], $meeting_field['options'], true ) ) {
 		return new WP_Error( 'meetlib_meeting', 'Please choose a meeting option.', array( 'status' => 400 ) );
 	}
 
@@ -262,16 +311,7 @@ function meetlib_handle_request( WP_REST_Request $req ) {
 		require_once ABSPATH . 'wp-admin/includes/file.php';
 		$moved = wp_handle_upload( $file, array(
 			'test_form' => false,
-			'mimes'     => array(
-				'pdf'      => 'application/pdf',
-				'doc'      => 'application/msword',
-				'docx'     => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-				'txt'      => 'text/plain',
-				'rtf'      => 'application/rtf',
-				'png'      => 'image/png',
-				'jpg|jpeg' => 'image/jpeg',
-				'gif'      => 'image/gif',
-			),
+			'mimes'     => meetlib_upload_mimes(),
 		) );
 		if ( isset( $moved['error'] ) ) {
 			return new WP_Error( 'meetlib_upload', 'The attachment could not be saved. Please try again without it.', array( 'status' => 400 ) );
@@ -295,19 +335,31 @@ function meetlib_handle_request( WP_REST_Request $req ) {
 	);
 	foreach ( $meta as $k => $v ) { update_post_meta( $post_id, $k, $v ); }
 
-	// 7. Email the librarian (best-effort; failure does not fail the request).
-	meetlib_notify( $lib, $data, $attach_url );
+	// 7. Optional: add the answers to the patron's event on the librarian's Google Calendar.
+	$calendar = meetlib_librarian_email( $lib );
+	$gcal     = meetlib_gcal_annotate( $calendar, $data, $attach_url );
+	if ( in_array( $gcal, array( 'not_found', 'error' ), true ) ) {
+		// The patron may not have finished booking yet; try once more a little later.
+		wp_schedule_single_event( time() + 15 * MINUTE_IN_SECONDS, 'meetlib_gcal_retry', array( $post_id ) );
+		$gcal = 'pending';
+	}
+	update_post_meta( $post_id, '_meetlib_calendar', $calendar );
+	update_post_meta( $post_id, '_meetlib_gcal', $gcal );
 
-	// 8. Success — hand back the embed URL for the Google step.
+	// 8. Email the librarian (best-effort; failure does not fail the request).
+	meetlib_notify( $lib, $data, $attach_url, $gcal );
+
+	// 9. Success. embedUrl/booking are kept for pages still running the 2.0 script from a cache.
 	return rest_ensure_response( array(
 		'ok'       => true,
+		'calendar' => $gcal,
 		'embedUrl' => meetlib_embed_url( $lib['booking'] ),
 		'booking'  => esc_url_raw( $lib['booking'] ),
 	) );
 }
 
 /** Email the librarian a formatted copy of the request. Skipped (with a log) if the librarian has no email on file. */
-function meetlib_notify( $lib, $data, $attach_url ) {
+function meetlib_notify( $lib, $data, $attach_url, $gcal = 'off' ) {
 	$to = meetlib_librarian_email( $lib );
 	if ( ! $to ) {
 		error_log( 'meet-a-librarian: no email for librarian "' . $lib['name'] . '"; request stored as CPT only.' );
@@ -325,8 +377,13 @@ function meetlib_notify( $lib, $data, $attach_url ) {
 		'Meeting preference: ' . $data['meeting'],
 		'Attachment: ' . ( $attach_url ? $attach_url : '(none)' ),
 		'',
-		'The patron will pick a date/time on your Google appointment page next.',
+		'The patron was asked to book a time on your Google appointment page before sending this.',
 	);
+	if ( 'added' === $gcal ) {
+		$lines[] = 'These details were also added to the appointment on your Google Calendar.';
+	} elseif ( 'pending' === $gcal ) {
+		$lines[] = 'No matching appointment was on your calendar yet; the plugin will look again in about 15 minutes.';
+	}
 	$headers = array( 'Reply-To: ' . $data['first'] . ' ' . $data['last'] . ' <' . $data['email'] . '>' );
 	if ( ! wp_mail( $to, $subject, implode( "\n", $lines ), $headers ) ) {
 		error_log( 'meet-a-librarian: wp_mail failed for request from ' . $data['email'] . '; stored as CPT.' );
@@ -338,6 +395,310 @@ function meetlib_librarian_email( $lib ) {
 	if ( ! empty( $lib['email'] ) && is_email( $lib['email'] ) ) { return $lib['email']; }
 	return '';
 }
+
+/* ------------------------------------------------------------------ *
+ *  Optional Google Calendar integration
+ *
+ *  A site admin pastes a Google service-account JSON key; each librarian shares their
+ *  calendar with the service account ("Make changes to events"). After a patron submits
+ *  the form, the plugin finds the patron's newly booked event on the librarian's calendar
+ *  (calendar ID = roster email) and appends the answers to its description.
+ *  With no key saved, every function here is a no-op and the plugin is email-only.
+ * ------------------------------------------------------------------ */
+
+/** The saved service-account key ({client_email, private_key}), or null. */
+function meetlib_gcal_key() {
+	$raw = get_option( MEETLIB_GCAL_OPTION );
+	if ( ! is_string( $raw ) || '' === $raw ) { return null; }
+	$k = json_decode( $raw, true );
+	if ( ! is_array( $k ) || empty( $k['client_email'] ) || empty( $k['private_key'] ) ) { return null; }
+	return $k;
+}
+
+function meetlib_gcal_enabled() {
+	return function_exists( 'openssl_sign' ) && null !== meetlib_gcal_key();
+}
+
+function meetlib_b64url( $s ) { return rtrim( strtr( base64_encode( $s ), '+/', '-_' ), '=' ); }
+
+/** OAuth access token for the service account (JWT bearer grant), cached in a transient. */
+function meetlib_gcal_token() {
+	$key = meetlib_gcal_key();
+	if ( ! $key ) { return new WP_Error( 'meetlib_gcal_off', 'Calendar integration is not configured.' ); }
+	$cache = 'meetlib_gcal_token_' . md5( $key['client_email'] );
+	$tok   = get_transient( $cache );
+	if ( is_string( $tok ) && '' !== $tok ) { return $tok; }
+
+	$now    = time();
+	$head   = meetlib_b64url( wp_json_encode( array( 'alg' => 'RS256', 'typ' => 'JWT' ) ) );
+	$claims = meetlib_b64url( wp_json_encode( array(
+		'iss'   => $key['client_email'],
+		'scope' => 'https://www.googleapis.com/auth/calendar.events',
+		'aud'   => 'https://oauth2.googleapis.com/token',
+		'iat'   => $now,
+		'exp'   => $now + 3600,
+	) ) );
+	$pk  = openssl_pkey_get_private( $key['private_key'] );
+	$sig = '';
+	if ( ! $pk || ! openssl_sign( $head . '.' . $claims, $sig, $pk, OPENSSL_ALGO_SHA256 ) ) {
+		return new WP_Error( 'meetlib_gcal_key', 'The saved service-account private key could not be used.' );
+	}
+	$res = wp_remote_post( 'https://oauth2.googleapis.com/token', array(
+		'timeout' => 10,
+		'body'    => array(
+			'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+			'assertion'  => $head . '.' . $claims . '.' . meetlib_b64url( $sig ),
+		),
+	) );
+	if ( is_wp_error( $res ) ) { return $res; }
+	$body = json_decode( wp_remote_retrieve_body( $res ), true );
+	if ( empty( $body['access_token'] ) ) {
+		return new WP_Error( 'meetlib_gcal_auth', 'Google rejected the service-account key.' );
+	}
+	$ttl = isset( $body['expires_in'] ) ? (int) $body['expires_in'] : 3600;
+	set_transient( $cache, $body['access_token'], max( 60, $ttl - 300 ) );
+	return $body['access_token'];
+}
+
+/** Call the Calendar v3 API. Returns the decoded JSON array or WP_Error (data.status = HTTP code). */
+function meetlib_gcal_api( $method, $path, $query = array(), $body = null ) {
+	$tok = meetlib_gcal_token();
+	if ( is_wp_error( $tok ) ) { return $tok; }
+	$url = 'https://www.googleapis.com/calendar/v3' . $path;
+	if ( $query ) { $url .= '?' . http_build_query( $query, '', '&', PHP_QUERY_RFC3986 ); }
+	$args = array(
+		'method'  => $method,
+		'timeout' => 10,
+		'headers' => array( 'Authorization' => 'Bearer ' . $tok ),
+	);
+	if ( null !== $body ) {
+		$args['headers']['Content-Type'] = 'application/json';
+		$args['body']                    = wp_json_encode( $body );
+	}
+	$res = wp_remote_request( $url, $args );
+	if ( is_wp_error( $res ) ) { return $res; }
+	$code = (int) wp_remote_retrieve_response_code( $res );
+	$data = json_decode( wp_remote_retrieve_body( $res ), true );
+	if ( $code < 200 || $code >= 300 ) {
+		return new WP_Error( 'meetlib_gcal_http', 'Google Calendar returned HTTP ' . $code . '.', array( 'status' => $code ) );
+	}
+	return is_array( $data ) ? $data : array();
+}
+
+function meetlib_gcal_events_path( $calendar_id ) {
+	return '/calendars/' . rawurlencode( $calendar_id ) . '/events';
+}
+
+/** The answers as HTML for the event description (Google renders appointment descriptions as HTML). */
+function meetlib_gcal_details_html( $data, $attach_url ) {
+	$none = '(none given)';
+	$rows = array(
+		'Name'                => trim( $data['first'] . ' ' . $data['last'] ),
+		'Email'               => $data['email'],
+		'How can I help you?' => $data['help'],
+		'Course'              => $data['course'],
+		'Assignment due'      => $data['due'],
+		'Meeting preference'  => $data['meeting'],
+	);
+	$h = '<b>' . esc_html( MEETLIB_GCAL_MARKER ) . '</b>';
+	foreach ( $rows as $label => $v ) {
+		$h .= '<br><b>' . esc_html( $label ) . ':</b> ' . nl2br( esc_html( '' !== trim( $v ) ? $v : $none ), false );
+	}
+	if ( $attach_url ) {
+		$h .= '<br><b>Attachment:</b> <a href="' . esc_url( $attach_url ) . '">' . esc_html( $attach_url ) . '</a>';
+	}
+	return $h;
+}
+
+/**
+ * Find the patron's upcoming event on the librarian's calendar and append the answers.
+ * Returns: added | not_found | error | no_calendar | off.
+ */
+function meetlib_gcal_annotate( $calendar_id, $data, $attach_url ) {
+	if ( ! meetlib_gcal_enabled() ) { return 'off'; }
+	if ( '' === (string) $calendar_id ) { return 'no_calendar'; }
+
+	$path = meetlib_gcal_events_path( $calendar_id );
+	$list = meetlib_gcal_api( 'GET', $path, array(
+		'q'            => $data['email'],
+		'timeMin'      => gmdate( 'Y-m-d\TH:i:s\Z' ),
+		'updatedMin'   => gmdate( 'Y-m-d\TH:i:s\Z', time() - 6 * HOUR_IN_SECONDS ),
+		'singleEvents' => 'true',
+		'maxResults'   => 50,
+	) );
+	if ( is_wp_error( $list ) ) {
+		error_log( 'meet-a-librarian: calendar lookup failed for ' . $calendar_id . ': ' . $list->get_error_message() );
+		return 'error';
+	}
+
+	// Newest-created upcoming event with the patron as a guest that we haven't already annotated.
+	$best = null;
+	$items = isset( $list['items'] ) && is_array( $list['items'] ) ? $list['items'] : array();
+	foreach ( $items as $ev ) {
+		if ( isset( $ev['status'] ) && 'cancelled' === $ev['status'] ) { continue; }
+		$desc = isset( $ev['description'] ) ? (string) $ev['description'] : '';
+		if ( false !== strpos( $desc, MEETLIB_GCAL_MARKER ) ) { continue; }
+		$guest = false;
+		foreach ( ( isset( $ev['attendees'] ) && is_array( $ev['attendees'] ) ) ? $ev['attendees'] : array() as $a ) {
+			if ( isset( $a['email'] ) && 0 === strcasecmp( $a['email'], $data['email'] ) ) { $guest = true; break; }
+		}
+		if ( ! $guest ) { continue; }
+		$created = isset( $ev['created'] ) ? (string) $ev['created'] : '';
+		if ( null === $best || strcmp( $created, (string) $best['created'] ) > 0 ) {
+			$best            = $ev;
+			$best['created'] = $created;
+		}
+	}
+	if ( ! $best ) { return 'not_found'; }
+
+	$desc  = isset( $best['description'] ) ? trim( (string) $best['description'] ) : '';
+	$patch = meetlib_gcal_api(
+		'PATCH',
+		$path . '/' . rawurlencode( $best['id'] ),
+		array( 'sendUpdates' => 'none' ),
+		array( 'description' => ( '' !== $desc ? $desc . '<br><br>' : '' ) . meetlib_gcal_details_html( $data, $attach_url ) )
+	);
+	if ( is_wp_error( $patch ) ) {
+		error_log( 'meet-a-librarian: could not update event on ' . $calendar_id . ': ' . $patch->get_error_message() );
+		return 'error';
+	}
+	return 'added';
+}
+
+/** One delayed retry (scheduled by the request handler) for patrons who submitted before booking. */
+add_action( 'meetlib_gcal_retry', 'meetlib_gcal_retry', 10, 1 );
+function meetlib_gcal_retry( $post_id ) {
+	$post_id = (int) $post_id;
+	if ( MEETLIB_CPT !== get_post_type( $post_id ) || 'pending' !== get_post_meta( $post_id, '_meetlib_gcal', true ) ) { return; }
+	$data = array();
+	foreach ( array( 'first', 'last', 'email', 'help', 'course', 'due', 'meeting' ) as $k ) {
+		$data[ $k ] = (string) get_post_meta( $post_id, '_meetlib_' . $k, true );
+	}
+	$status = meetlib_gcal_annotate(
+		(string) get_post_meta( $post_id, '_meetlib_calendar', true ),
+		$data,
+		(string) get_post_meta( $post_id, '_meetlib_attach_url', true )
+	);
+	update_post_meta( $post_id, '_meetlib_gcal', $status );
+}
+
+/** Human-readable label for a request's `_meetlib_gcal` status. */
+function meetlib_gcal_status_label( $status ) {
+	$map = array(
+		'added'       => 'Added to the calendar event',
+		'pending'     => 'Waiting for the booking — will check again shortly',
+		'not_found'   => 'No matching booking found — sent by email only',
+		'error'       => 'Calendar not reachable (not shared with the integration?) — sent by email only',
+		'no_calendar' => 'Librarian has no email on file — not added',
+		'off'         => 'Calendar integration off — sent by email only',
+	);
+	return isset( $map[ $status ] ) ? $map[ $status ] : '';
+}
+
+/** Admin screen: save/remove the service-account key and check each librarian's calendar access. */
+function meetlib_gcal_page() {
+	if ( ! current_user_can( 'manage_options' ) ) { return; }
+	$key  = meetlib_gcal_key();
+	$self = admin_url( 'admin.php?page=meet-a-librarian-calendar' );
+
+	echo '<div class="wrap"><h1>Calendar Integration</h1>';
+	$msgs = array(
+		'saved'   => array( 'success', 'Key saved.' ),
+		'removed' => array( 'success', 'Key removed. The plugin is now email-only.' ),
+		'invalid' => array( 'error', 'That is not a valid service-account JSON key. Paste the whole file you downloaded from Google Cloud.' ),
+	);
+	$m = isset( $_GET['meetlib_msg'] ) ? sanitize_key( $_GET['meetlib_msg'] ) : '';
+	if ( isset( $msgs[ $m ] ) ) {
+		echo '<div class="notice notice-' . esc_attr( $msgs[ $m ][0] ) . '"><p>' . esc_html( $msgs[ $m ][1] ) . '</p></div>';
+	}
+	if ( ! function_exists( 'openssl_sign' ) ) {
+		echo '<div class="notice notice-error"><p>This server\'s PHP has no OpenSSL extension, so the integration cannot run.</p></div>';
+	}
+
+	echo '<div style="max-width:760px">';
+	echo '<p><strong>Optional.</strong> Without it, the plugin emails each request to the librarian, as before. With it, the patron\'s answers are also added to the description of the appointment they booked on the librarian\'s Google Calendar.</p>';
+
+	if ( $key ) {
+		echo '<h2>Status: on</h2>';
+		echo '<p>Service account: <code>' . esc_html( $key['client_email'] ) . '</code></p>';
+		echo '<h3>What each librarian does (once)</h3><ol>'
+			. '<li>Open Google Calendar &rarr; <strong>Settings</strong> (gear icon).</li>'
+			. '<li>Under <strong>Settings for my calendars</strong>, click their own calendar (their name).</li>'
+			. '<li>Under <strong>Share with specific people or groups</strong>, click <strong>Add people and groups</strong>, paste the service-account address above, and choose <strong>Make changes to events</strong>.</li>'
+			. '</ol><p>Nothing else changes: booking links and the directory stay as they are. The email in each librarian\'s directory entry must be their Google Calendar address.</p>';
+
+		echo '<h3>Calendar access</h3>';
+		if ( isset( $_GET['meetlib_check'] ) && wp_verify_nonce( isset( $_GET['_wpnonce'] ) ? sanitize_text_field( wp_unslash( $_GET['_wpnonce'] ) ) : '', 'meetlib_gcal_check' ) ) {
+			echo '<table class="widefat striped"><thead><tr><th>Librarian</th><th>Calendar</th><th>Access</th></tr></thead><tbody>';
+			foreach ( meetlib_get() as $lib ) {
+				$cal = meetlib_librarian_email( $lib );
+				if ( '' === $cal ) {
+					$state = 'No email in the directory entry';
+				} else {
+					$r = meetlib_gcal_api( 'GET', meetlib_gcal_events_path( $cal ), array( 'maxResults' => 1 ) );
+					if ( is_wp_error( $r ) ) {
+						$data  = $r->get_error_data();
+						$code  = is_array( $data ) && isset( $data['status'] ) ? (int) $data['status'] : 0;
+						$state = ( 404 === $code || 403 === $code ) ? 'Not shared yet' : 'Error: ' . $r->get_error_message();
+					} elseif ( isset( $r['accessRole'] ) && in_array( $r['accessRole'], array( 'writer', 'owner' ), true ) ) {
+						$state = '✓ Ready';
+					} else {
+						$state = 'Shared, but needs "Make changes to events"';
+					}
+				}
+				echo '<tr><td>' . esc_html( $lib['name'] ) . '</td><td>' . esc_html( $cal ) . '</td><td>' . esc_html( $state ) . '</td></tr>';
+			}
+			echo '</tbody></table>';
+		}
+		echo '<p><a class="button" href="' . esc_url( wp_nonce_url( add_query_arg( 'meetlib_check', '1', $self ), 'meetlib_gcal_check' ) ) . '">Check each librarian\'s calendar access</a></p>';
+	} else {
+		echo '<h2>Status: off</h2>';
+		echo '<h3>Set up (site admin, once)</h3><ol>'
+			. '<li>In the Google Cloud console, create (or pick) a project and enable the <strong>Google Calendar API</strong>.</li>'
+			. '<li>Create a <strong>service account</strong> (no roles needed), open it &rarr; <strong>Keys</strong> &rarr; <strong>Add key</strong> &rarr; <strong>JSON</strong>.</li>'
+			. '<li>Paste the downloaded file\'s contents below and save. This page will then show the address each librarian shares their calendar with.</li>'
+			. '</ol><p>No Google Workspace admin access is needed: the service account can only see calendars that librarians share with it.</p>';
+	}
+
+	echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '">';
+	echo '<input type="hidden" name="action" value="meetlib_gcal_save">';
+	wp_nonce_field( 'meetlib_gcal_save' );
+	echo '<p><label for="meetlib-gcal-key"><strong>' . ( $key ? 'Replace the' : 'Service-account' ) . ' JSON key</strong></label><br>';
+	echo '<textarea id="meetlib-gcal-key" name="meetlib_gcal_key" rows="6" class="large-text code" autocomplete="off" spellcheck="false" placeholder="{ &quot;type&quot;: &quot;service_account&quot;, ... }"></textarea></p>';
+	echo '<p class="description">The key is stored in the WordPress database and never shown again. Anyone with database access could read it; it can only reach calendars shared with the service account.</p>';
+	if ( $key ) {
+		echo '<p><label><input type="checkbox" name="meetlib_gcal_remove" value="1"> Remove the key and turn the integration off</label></p>';
+	}
+	submit_button( 'Save' );
+	echo '</form></div></div>';
+}
+
+add_action( 'admin_post_meetlib_gcal_save', function () {
+	if ( ! current_user_can( 'manage_options' ) ) { wp_die( 'Not allowed.', 403 ); }
+	check_admin_referer( 'meetlib_gcal_save' );
+	$back = admin_url( 'admin.php?page=meet-a-librarian-calendar' );
+	$old  = meetlib_gcal_key();
+
+	if ( ! empty( $_POST['meetlib_gcal_remove'] ) ) {
+		delete_option( MEETLIB_GCAL_OPTION );
+		if ( $old ) { delete_transient( 'meetlib_gcal_token_' . md5( $old['client_email'] ) ); }
+		wp_safe_redirect( add_query_arg( 'meetlib_msg', 'removed', $back ) );
+		exit;
+	}
+
+	$raw = isset( $_POST['meetlib_gcal_key'] ) ? trim( wp_unslash( $_POST['meetlib_gcal_key'] ) ) : ''; // phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- JSON key, validated below
+	if ( '' === $raw ) { wp_safe_redirect( $back ); exit; }
+	$k = json_decode( $raw, true );
+	if ( ! is_array( $k ) || empty( $k['client_email'] ) || ! is_email( $k['client_email'] ) || empty( $k['private_key'] )
+		|| ! function_exists( 'openssl_pkey_get_private' ) || ! openssl_pkey_get_private( $k['private_key'] ) ) {
+		wp_safe_redirect( add_query_arg( 'meetlib_msg', 'invalid', $back ) );
+		exit;
+	}
+	if ( $old ) { delete_transient( 'meetlib_gcal_token_' . md5( $old['client_email'] ) ); }
+	update_option( MEETLIB_GCAL_OPTION, wp_json_encode( array( 'client_email' => $k['client_email'], 'private_key' => $k['private_key'] ) ), false );
+	wp_safe_redirect( add_query_arg( 'meetlib_msg', 'saved', $back ) );
+	exit;
+} );
 
 /* ------------------------------------------------------------------ *
  *  Admin editor page
@@ -361,6 +722,14 @@ add_action( 'admin_menu', function () {
 		'edit_pages',
 		'edit.php?post_type=' . MEETLIB_CPT
 	);
+	add_submenu_page(
+		'meet-a-librarian',
+		'Calendar Integration',
+		'Calendar Integration',
+		'manage_options',
+		'meet-a-librarian-calendar',
+		'meetlib_gcal_page'
+	);
 } );
 
 function meetlib_admin_page() {
@@ -369,6 +738,9 @@ function meetlib_admin_page() {
 
 	echo '<div class="wrap"><h1>Meet With a Librarian</h1>';
 	echo '<p style="max-width:680px;color:#555">Add each librarian and paste their Google appointment <strong>booking link</strong>, then click <strong>Save &amp; publish</strong>. Changes go live on the website immediately — no files, no code. Show the directory on any page with the shortcode <code>[meet_a_librarian]</code>.</p>';
+	if ( current_user_can( 'manage_options' ) ) {
+		echo '<p style="max-width:680px;color:#555">Optional: add patrons\' answers to their Google Calendar appointments under <a href="' . esc_url( admin_url( 'admin.php?page=meet-a-librarian-calendar' ) ) . '">Calendar Integration</a> (currently <strong>' . ( meetlib_gcal_enabled() ? 'on' : 'off' ) . '</strong>).</p>';
+	}
 
 	echo '<script>window.MEETLIB=' . wp_json_encode( array(
 		'root'    => $root,
@@ -474,17 +846,18 @@ function render(){
   libs.forEach(function(lib,i){
     var card=el("div","card");
     var num=el("div","num");num.textContent="Librarian "+(i+1);card.appendChild(num);
-    var rm=el("button","b ghost tiny");rm.type="button";rm.textContent="remove";rm.onclick=function(){libs.splice(i,1);render();};card.appendChild(rm);
-    var grid=el("div","grid");
+    var rm=el("button","b ghost tiny");rm.type="button";rm.textContent="remove";rm.setAttribute("aria-label","Remove librarian "+(i+1));rm.onclick=function(){libs.splice(i,1);render();};card.appendChild(rm);
+    var grid=el("div","grid"), wb=null;
     FIELDS.forEach(function(f){
-      var cell=el("div",f.full?"full":"");
-      var lab=el("label");lab.textContent=f.label;
-      var inp=el("input");inp.type="text";inp.value=lib[f.k]||"";
-      inp.oninput=function(){lib[f.k]=inp.value;if(f.k==="name")render();};
+      var cell=el("div",f.full?"full":""), id="meetlib-"+i+"-"+f.k;
+      var lab=el("label");lab.textContent=f.label;lab.htmlFor=id;
+      var inp=el("input");inp.type="text";inp.id=id;inp.value=lib[f.k]||"";
+      // Renaming only refreshes this card's widget box; a full re-render would steal focus mid-typing.
+      inp.oninput=function(){lib[f.k]=inp.value;if(f.k==="name"&&wb){var nb=widgetBox(lib);card.replaceChild(nb,wb);wb=nb;}};
       cell.appendChild(lab);cell.appendChild(inp);grid.appendChild(cell);
     });
     card.appendChild(grid);
-    card.appendChild(widgetBox(lib));
+    wb=widgetBox(lib);card.appendChild(wb);
     wrap.appendChild(card);
   });
 }
@@ -572,6 +945,10 @@ add_action( 'edit_form_after_title', function ( $post ) {
 	if ( $att ) {
 		echo '<tr><th>Attachment</th><td><a href="' . esc_url( $att ) . '" target="_blank" rel="noopener">Download</a></td></tr>';
 	}
+	$gcal = meetlib_gcal_status_label( get_post_meta( $post->ID, '_meetlib_gcal', true ) );
+	if ( '' !== $gcal ) {
+		echo '<tr><th>Calendar invite</th><td>' . esc_html( $gcal ) . '</td></tr>';
+	}
 	echo '</tbody></table>';
 }, 10, 1 );
 
@@ -582,16 +959,18 @@ add_action( 'edit_form_after_title', function ( $post ) {
 add_shortcode( 'meet_a_librarian', 'meetlib_shortcode' );
 
 function meetlib_shortcode( $atts ) {
-	$root   = esc_url( rest_url( 'meet-a-librarian/v1/librarians' ) );
-	$submit = esc_url( rest_url( 'meet-a-librarian/v1/request' ) );
+	// esc_url_raw, not esc_url: these go into JSON, where esc_url's &#038; would corrupt query strings.
+	$root   = esc_url_raw( rest_url( 'meet-a-librarian/v1/librarians' ) );
+	$submit = esc_url_raw( rest_url( 'meet-a-librarian/v1/request' ) );
 	$config = array(
-		'listUrl'   => $root,
-		'submitUrl' => $submit,
-		'nonce'     => wp_create_nonce( 'wp_rest' ),
-		'fields'    => meetlib_form_fields(),
-		'maxBytes'  => meetlib_max_upload_bytes(),
-		'exts'      => meetlib_upload_exts(),
-		'domains'   => meetlib_email_domains(),
+		'listUrl'     => $root,
+		'submitUrl'   => $submit,
+		'nonce'       => wp_create_nonce( 'wp_rest' ),
+		'fields'      => meetlib_form_fields(),
+		'maxBytes'    => meetlib_max_upload_bytes(),
+		'exts'        => meetlib_upload_exts(),
+		'domains'     => meetlib_email_domains(),
+		'urgentEmail' => meetlib_urgent_email(),
 	);
 	$config_js = '<script>window.MEETLIB_URL=' . wp_json_encode( $root )
 		. ';window.MEETLIB_FORM=' . wp_json_encode( $config ) . ';</script>';
@@ -628,11 +1007,25 @@ function meetlib_widget_markup() {
   #meetlib-form-host .meetlib-f__help{font-size:.85rem;color:var(--meetlib-muted);margin-top:3px}
   #meetlib-form-host .meetlib-f__req{color:#b42318}
   #meetlib-form-host .meetlib-f__err{color:#b42318;font-size:.85rem;margin-top:3px}
+  #meetlib-form-host .meetlib-f__err:empty{display:none}
+  #meetlib-form-host fieldset.meetlib-f__field{border:0;padding:0;min-width:0}
+  #meetlib-form-host legend{font-weight:600;margin-bottom:4px;padding:0}
   #meetlib-form-host .meetlib-f__radio{display:block;font-weight:400;margin:4px 0}
-  #meetlib-form-host .meetlib-f__submit{background:var(--meetlib-accent);color:#fff;border:0;padding:10px 18px;border-radius:7px;font-weight:600;cursor:pointer}
-  #meetlib-form-host .meetlib-f__cancel{background:none;border:0;color:var(--meetlib-muted);cursor:pointer;margin-left:10px;text-decoration:underline}
-  #meetlib-form-host iframe{width:100%;height:720px;border:0}
+  #meetlib-form-host .meetlib-f__submit{display:inline-block;background:var(--meetlib-accent);color:#fff;border:0;padding:10px 18px;border-radius:7px;font-weight:600;font-size:1rem;cursor:pointer;text-decoration:none}
+  #meetlib-form-host .meetlib-f__submit:hover{background:#003b71;color:#fff}
+  #meetlib-form-host .meetlib-f__submit[disabled]{opacity:.7;cursor:wait}
+  #meetlib-form-host .meetlib-f__cancel{background:none;border:0;padding:6px 4px;color:#555;font-size:1rem;cursor:pointer;text-decoration:underline}
+  #meetlib-form-host button:focus-visible,#meetlib-form-host a:focus-visible,#meetlib-form-host input:focus-visible,#meetlib-form-host textarea:focus-visible{outline:3px solid var(--meetlib-accent);outline-offset:2px}
+  #meetlib-form-host .meetlib-f__actions{display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;margin-top:16px}
+  #meetlib-form-host .meetlib-f__h{font-size:1.25rem;line-height:1.3;margin:0 0 10px}
+  #meetlib-form-host .meetlib-f__h:focus{outline:none}
+  #meetlib-form-host iframe{width:100%;height:720px;border:1px solid var(--meetlib-line);border-radius:8px}
   #meetlib-form-host .meetlib-f__note{background:#eef4fb;border:1px solid #cfe0f2;border-radius:8px;padding:12px 14px;margin-bottom:16px}
+  #meetlib-form-host .meetlib-f__urgent{margin:12px 0 0;padding:10px 14px;border-left:4px solid var(--meetlib-accent);background:#f5f7fa}
+  #meetlib-form-host .meetlib-f__alert{background:#fef3f2;border:1px solid #fecdca;color:#b42318;border-radius:8px;padding:12px 14px;margin-bottom:16px}
+  #meetlib-form-host .meetlib-f__alert:empty{display:none}
+  #meetlib-form-host .meetlib-f__sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+  #meetlib-form-host [hidden]{display:none}
 </style>
 HTML;
 }
@@ -644,8 +1037,8 @@ function meetlib_widget_script() {
 "use strict";
 var mount=document.getElementById("meetlib-librarians");
 var host=document.getElementById("meetlib-form-host");
-if(!mount||!window.MEETLIB_URL||!window.MEETLIB_FORM)return;
-var CFG=window.MEETLIB_FORM, LIST=[];
+if(!mount||!host||!window.MEETLIB_URL||!window.MEETLIB_FORM)return;
+var CFG=window.MEETLIB_FORM, LIST=[], opener=null;
 var s=new Date();
 var bust=""+s.getUTCFullYear()+(s.getUTCMonth()+1)+s.getUTCDate()+s.getUTCHours();
 var url=MEETLIB_URL+(MEETLIB_URL.indexOf("?")>-1?"&":"?")+"v="+bust;
@@ -654,6 +1047,7 @@ fetch(url,{cache:"no-cache"}).then(function(r){if(!r.ok)throw 0;return r.json();
 });
 function esc(x){return String(x==null?"":x).replace(/[&<>"']/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});}
 function slug(name){return String(name==null?"":name).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");}
+function byId(id){return document.getElementById(id);}
 function render(list){
   LIST=Array.isArray(list)?list:[];
   if(LIST.length===0){mount.innerHTML='<p class="meetlib__error">No librarians are listed yet.</p>';return;}
@@ -667,51 +1061,97 @@ function render(list){
     if(l.title)sub+='<div class="meetlib__title">'+esc(l.title)+'</div>';
     if(l.liaison)sub+='<div class="meetlib__title">'+esc(l.liaison)+'</div>';
     var action=l.booking
-      ? '<button type="button" class="meetlib__book" data-i="'+i+'">Book an appointment</button>'
+      ? '<button type="button" class="meetlib__book" data-i="'+i+'">Book an appointment<span class="meetlib-f__sr"> with '+esc(l.name)+'</span></button>'
       : '<span class="meetlib__soon">Booking link coming soon</span>';
     html+='<div class="meetlib__card">'+photo+'<div class="meetlib__name">'+name+'</div>'+sub+action+'</div>';
   });
   html+='</div>';
   mount.innerHTML=html;
   Array.prototype.forEach.call(mount.querySelectorAll(".meetlib__book"),function(b){
-    b.addEventListener("click",function(){openForm(parseInt(b.getAttribute("data-i"),10));});
+    b.addEventListener("click",function(){opener=b;openBooking(parseInt(b.getAttribute("data-i"),10));});
   });
-  var m=/[?&]librarian=([^&#]+)/.exec(location.search), want=m?decodeURIComponent(m[1]).toLowerCase():"";
-  if(want){for(var wi=0;wi<LIST.length;wi++){if(LIST[wi].booking&&slug(LIST[wi].name)===want){openForm(wi);break;}}}
+  var m=/[?&]librarian=([^&#]+)/.exec(location.search), want="";
+  if(m){try{want=decodeURIComponent(m[1]).toLowerCase();}catch(e){want="";}}
+  if(want){for(var wi=0;wi<LIST.length;wi++){if(LIST[wi].booking&&slug(LIST[wi].name)===want){openBooking(wi);break;}}}
 }
 function fieldHtml(f){
-  var req=f.required?' <span class="meetlib-f__req">*</span>':'';
-  var help=f.help?'<div class="meetlib-f__help">'+esc(f.help)+'</div>':'';
-  var err='<div class="meetlib-f__err" data-err="'+f.key+'" style="display:none"></div>';
-  var ctl='';
-  if(f.type==="textarea"){ctl='<textarea data-k="'+f.key+'"></textarea>';}
-  else if(f.type==="radio"){ctl=(f.options||[]).map(function(o){
-      return '<label class="meetlib-f__radio"><input type="radio" name="meetlib_'+f.key+'" value="'+esc(o)+'"> '+esc(o)+'</label>';}).join("");}
-  else if(f.type==="file"){ctl='<input type="file" data-k="'+f.key+'">';}
-  else{ctl='<input type="'+(f.type==="email"?"email":"text")+'" data-k="'+f.key+'">';}
-  return '<div class="meetlib-f__field"><label>'+esc(f.label)+req+'</label>'+ctl+help+err+'</div>';
+  var id="meetlib-f-"+f.key;
+  var req=f.required?' <span class="meetlib-f__req" aria-hidden="true">*</span>':'';
+  var helpId=f.help?id+'-help':'';
+  var help=f.help?'<div class="meetlib-f__help" id="'+helpId+'">'+esc(f.help)+'</div>':'';
+  var err='<div class="meetlib-f__err" id="'+id+'-err" data-err="'+f.key+'"></div>';
+  var desc=' aria-describedby="'+(helpId?helpId+' ':'')+id+'-err"';
+  var rq=f.required?' required':'';
+  if(f.type==="radio"){
+    var opts=(f.options||[]).map(function(o,n){
+      return '<label class="meetlib-f__radio"><input type="radio" name="meetlib_'+f.key+'" value="'+esc(o)+'"'+rq+'> '+esc(o)+'</label>';
+    }).join("");
+    return '<fieldset class="meetlib-f__field" id="'+id+'"'+desc+'><legend>'+esc(f.label)+req+'</legend>'+opts+help+err+'</fieldset>';
+  }
+  var ctl;
+  if(f.type==="textarea"){ctl='<textarea id="'+id+'" data-k="'+f.key+'"'+rq+desc+'></textarea>';}
+  else if(f.type==="file"){ctl='<input type="file" id="'+id+'" data-k="'+f.key+'" accept="'+esc((CFG.exts||[]).map(function(x){return "."+x;}).join(","))+'"'+desc+'>';}
+  else{
+    var ac={first:"given-name",last:"family-name",email:"email"}[f.key];
+    ctl='<input type="'+(f.type==="email"?"email":"text")+'" id="'+id+'" data-k="'+f.key+'"'+(ac?' autocomplete="'+ac+'"':'')+rq+desc+'>';
+  }
+  return '<div class="meetlib-f__field"><label for="'+id+'">'+esc(f.label)+req+'</label>'+ctl+help+err+'</div>';
 }
-function openForm(i){
+function focusEl(n){if(n){n.focus();if(n.scrollIntoView)n.scrollIntoView({behavior:"smooth",block:"start"});}}
+function close(){host.innerHTML="";if(opener&&document.body.contains(opener))opener.focus();}
+function showStep(n){byId("meetlib-step1").hidden=n!==1;byId("meetlib-step2").hidden=n!==2;focusEl(byId("meetlib-h"+n));}
+/* Step 1 = the librarian's Google scheduler; step 2 = the intake form. Both stay in the DOM so
+   going back to the calendar doesn't reload the iframe and lose the patron's place. */
+function openBooking(i){
   var l=LIST[i];if(!l)return;
-  var fields=CFG.fields.map(fieldHtml).join("");
-  host.innerHTML='<div class="meetlib-f__note">Request an appointment with <strong>'+esc(l.name)+'</strong>. '
-    +'Answer a few questions, then pick a time on the next screen.</div>'
-    +'<form id="meetlib-f" novalidate>'+fields
-    +'<input type="text" name="website" style="position:absolute;left:-9999px" tabindex="-1" autocomplete="off" aria-hidden="true">'
-    +'<button type="submit" class="meetlib-f__submit">Continue to pick a time</button>'
-    +'<button type="button" class="meetlib-f__cancel" id="meetlib-f-cancel">Cancel</button></form>';
-  host.scrollIntoView({behavior:"smooth",block:"start"});
-  document.getElementById("meetlib-f-cancel").addEventListener("click",function(){host.innerHTML="";});
-  document.getElementById("meetlib-f").addEventListener("submit",function(e){e.preventDefault();submitForm(i);});
+  var embed=l.embed||"";
+  var cal=embed
+    ? '<iframe src="'+esc(embed)+'" title="'+esc("Available appointment times with "+l.name)+'"></iframe>'
+    : '<p><a class="meetlib-f__submit" href="'+esc(l.booking)+'" target="_blank" rel="noopener">Open '+esc(l.name)+'’s booking page<span class="meetlib-f__sr"> (opens in a new tab)</span></a></p>';
+  var urgent=CFG.urgentEmail
+    ? '<p class="meetlib-f__urgent">Need an appointment within the next 24 hours? Email <a href="mailto:'+esc(CFG.urgentEmail)+'">'+esc(CFG.urgentEmail)+'</a>.</p>'
+    : '';
+  host.innerHTML=
+     '<section id="meetlib-step1" aria-labelledby="meetlib-h1">'
+    +'<h2 class="meetlib-f__h" id="meetlib-h1" tabindex="-1">Step 1 of 2: Pick a time with '+esc(l.name)+'</h2>'
+    +'<p class="meetlib-f__note">Choose a date and time'+(embed?' below':'')+' and confirm your booking. Then continue to step 2 to tell '+esc(l.name)+' what you’d like help with.</p>'
+    +cal+urgent
+    +'<div class="meetlib-f__actions"><button type="button" class="meetlib-f__submit" id="meetlib-next">I’ve booked my time — continue</button>'
+    +'<button type="button" class="meetlib-f__cancel" id="meetlib-cancel">Cancel</button></div>'
+    +'</section>'
+    +'<section id="meetlib-step2" aria-labelledby="meetlib-h2" hidden>'
+    +'<h2 class="meetlib-f__h" id="meetlib-h2" tabindex="-1">Step 2 of 2: Tell '+esc(l.name)+' about your request</h2>'
+    +'<div id="meetlib-step2-body">'
+    +'<div class="meetlib-f__alert" id="meetlib-alert" role="alert"></div>'
+    +'<p class="meetlib-f__help">Fields marked with <span class="meetlib-f__req">*</span> are required.</p>'
+    +'<form id="meetlib-f" novalidate>'+CFG.fields.map(fieldHtml).join("")
+    +'<div aria-hidden="true" style="position:absolute;left:-9999px"><label>Leave this empty <input type="text" name="website" tabindex="-1" autocomplete="off"></label></div>'
+    +'<div class="meetlib-f__actions"><button type="submit" class="meetlib-f__submit">Send my details</button>'
+    +'<button type="button" class="meetlib-f__cancel" id="meetlib-back">Back to the calendar</button></div></form>'
+    +'</div></section>';
+  byId("meetlib-next").addEventListener("click",function(){showStep(2);});
+  byId("meetlib-cancel").addEventListener("click",close);
+  byId("meetlib-back").addEventListener("click",function(){showStep(1);});
+  byId("meetlib-f").addEventListener("submit",function(e){e.preventDefault();submitForm(i);});
+  showStep(1);
 }
 function getVal(k){var n=host.querySelector('[data-k="'+k+'"]');return n?n.value:"";}
 function getRadio(k){var n=host.querySelector('input[name="meetlib_'+k+'"]:checked');return n?n.value:"";}
-function showErr(k,msg){var e=host.querySelector('[data-err="'+k+'"]');if(e){e.textContent=msg;e.style.display=msg?"block":"none";}}
+function showErr(k,msg){
+  var e=host.querySelector('[data-err="'+k+'"]');if(e)e.textContent=msg;
+  Array.prototype.forEach.call(host.querySelectorAll('[data-k="'+k+'"],input[name="meetlib_'+k+'"]'),function(n){
+    if(msg)n.setAttribute("aria-invalid","true");else n.removeAttribute("aria-invalid");
+  });
+}
+function firstControl(k){return host.querySelector('[data-k="'+k+'"],input[name="meetlib_'+k+'"]');}
 function submitForm(i){
-  var l=LIST[i], ok=true;
+  var l=LIST[i], bad=null;
+  byId("meetlib-alert").textContent="";
   CFG.fields.forEach(function(f){showErr(f.key,"");});
+  function fail(k,msg){showErr(k,msg);if(!bad)bad=k;}
   var fd=new FormData();
   fd.append("librarian",i);
+  fd.append("librarianSlug",slug(l.name));
   fd.append("website",(host.querySelector('[name="website"]')||{}).value||"");
   fd.append("_wpnonce",CFG.nonce);
   CFG.fields.forEach(function(f){
@@ -719,43 +1159,45 @@ function submitForm(i){
       var fn=host.querySelector('[data-k="'+f.key+'"]');
       if(fn&&fn.files&&fn.files[0]){
         var file=fn.files[0];
-        if(file.size>CFG.maxBytes){showErr(f.key,"That file is larger than 20 MB.");ok=false;}
         var ext=(file.name.split(".").pop()||"").toLowerCase();
-        if(CFG.exts.indexOf(ext)<0){showErr(f.key,"Use PDF, Word, text, or an image.");ok=false;}
+        if(file.size>CFG.maxBytes)fail(f.key,"That file is larger than 20 MB.");
+        else if(CFG.exts.indexOf(ext)<0)fail(f.key,"Use PDF, Word, text, or an image.");
         fd.append("attachment",file);
       }
       return;
     }
     var v=f.type==="radio"?getRadio(f.key):getVal(f.key);
-    if(f.required&&!v.trim()){showErr(f.key,"This field is required.");ok=false;}
-    if(f.key==="email"&&v){
+    if(f.required&&!v.trim())fail(f.key,"This field is required.");
+    else if(f.key==="email"&&v){
       var dom=(v.split("@")[1]||"").toLowerCase();
-      if(CFG.domains.indexOf(dom)<0){showErr(f.key,"Use your "+CFG.domains.join(" or ")+" email.");ok=false;}
+      if(CFG.domains.indexOf(dom)<0)fail(f.key,"Use your "+CFG.domains.join(" or ")+" email.");
     }
     fd.append(f.key,v);
   });
-  if(!ok)return;
-  var btn=host.querySelector(".meetlib-f__submit");btn.disabled=true;btn.textContent="Submitting…";
+  if(bad){focusEl(firstControl(bad));return;}
+  var btn=host.querySelector('#meetlib-f button[type="submit"]');btn.disabled=true;btn.textContent="Sending…";
   fetch(CFG.submitUrl,{method:"POST",body:fd}).then(function(r){
-    return r.json().then(function(j){return{ok:r.ok,j:j};});
+    return r.json().then(function(j){return{ok:r.ok,j:j};},function(){return{ok:false,j:null};});
   }).then(function(res){
-    if(!res.ok){throw new Error(res.j&&res.j.message?res.j.message:"Submission failed.");}
-    showScheduler(l,res.j);
+    if(!res.ok){throw new Error(res.j&&res.j.message?res.j.message:"Something went wrong sending your details.");}
+    showDone(l,res.j);
   }).catch(function(err){
-    btn.disabled=false;btn.textContent="Continue to pick a time";
-    var top=host.querySelector(".meetlib-f__note");
-    if(top){top.innerHTML='<strong>'+esc(err.message)+'</strong> If this keeps happening, email the librarian directly.';}
+    btn.disabled=false;btn.textContent="Send my details";
+    var a=byId("meetlib-alert");
+    a.innerHTML=esc(err.message)+' If this keeps happening, '
+      +(l.email?'email <a href="mailto:'+esc(l.email)+'">'+esc(l.email)+'</a> directly.':'email the librarian directly.');
+    focusEl(a);
   });
 }
-function showScheduler(l,resp){
-  var embed=resp&&resp.embedUrl;
-  var book=(resp&&resp.booking)||l.booking;
-  host.innerHTML='<div class="meetlib-f__note">Thanks! Your details were sent to <strong>'+esc(l.name)
-    +'</strong>. Now pick a date and time below.</div>'
-    +(embed
-      ? '<iframe src="'+esc(embed)+'" title="Pick an appointment time"></iframe>'
-      : '<p><a class="meetlib-f__submit" href="'+esc(book)+'" target="_blank" rel="noopener" style="display:inline-block;text-decoration:none">Pick your time on Google →</a></p>');
-  host.scrollIntoView({behavior:"smooth",block:"start"});
+function showDone(l,resp){
+  var added=resp&&resp.calendar==="added";
+  byId("meetlib-h2").textContent="You’re all set";
+  byId("meetlib-step2-body").innerHTML='<p class="meetlib-f__note">Thanks! Your details were sent to <strong>'+esc(l.name)+'</strong>'
+    +(added?' and added to your appointment on their calendar.':'.')
+    +' You’ll get a calendar invitation from Google for the time you booked.</p>'
+    +'<p>Haven’t booked a time yet? <button type="button" class="meetlib-f__cancel" id="meetlib-back2">Go back to the calendar</button></p>';
+  byId("meetlib-back2").addEventListener("click",function(){showStep(1);});
+  showStep(2);
 }
 })();
 </script>
