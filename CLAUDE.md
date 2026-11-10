@@ -10,12 +10,13 @@ To check syntax locally: `php -l meet-a-librarian.php`. Everything else has to b
 
 The plugin version is set only in the `Version:` plugin header and follows semantic versioning. Bump it in every commit that changes the plugin: PATCH for bug and accessibility fixes, MINOR for new backward-compatible features, MAJOR for breaking changes (for example, changes to the shortcode, the REST routes, or the stored option or post-meta shape).
 
-Every major version gets a GitHub release. To publish one:
-1. Tag the release commit as `vX.Y.Z` with an annotated tag.
-2. Build `meet-a-librarian-X.Y.Z.zip` from that commit (`git show <sha>:meet-a-librarian.php`). The zip must contain a `meet-a-librarian/` folder holding the PHP file.
-3. Run `gh release create vX.Y.Z <zip> --latest`.
+**Every version bump gets a GitHub release**, cut right after the commit that bumps it. To publish one:
+1. Tag the release commit as `vX.Y.Z` with an annotated tag and push the tag.
+2. Build `wpmeet-X.Y.Z.zip` from that commit. Extract with Git Bash (`git show <sha>:meet-a-librarian.php > ...`); piping `git show` through PowerShell rewrites line endings and corrupts the file. The zip must contain a `meet-a-librarian/` folder holding the PHP file. Keep that folder name even though the zip is named `wpmeet-*`: it's what lets an existing install upgrade in place.
+3. Save the zip to `~/Downloads` (`C:\Users\thoma\Downloads\wpmeet-X.Y.Z.zip`).
+4. Run `gh release create vX.Y.Z <zip> --latest`.
 
-Breaking changes and upgrade steps go at the top of the release notes. Existing releases: `v1.2.1` (last 1.x; its zip keeps the 1.x plugin folder so an existing install upgrades in place) and `v2.0.0`.
+Breaking changes and upgrade steps go at the top of the release notes; otherwise state that no setup needs redoing. Existing releases: `v1.2.1` (last 1.x; its zip keeps the 1.x plugin folder so an existing install upgrades in place), `v2.0.0`, and `v2.1.0` (the first release named `wpmeet-*.zip`).
 
 ## Architecture
 
