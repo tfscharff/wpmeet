@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Meet With a Librarian
  * Description:        No-code "Meet With a Librarian" directory: staff manage librarians and their Google appointment booking links under Meet With a Librarian in wp-admin and click Save. Show the directory anywhere with the [meet_a_librarian] shortcode. Replaces LibCal appointments.
- * Version:           2.2.0
+ * Version:           2.3.0
  * Author:            Madeleine Clark Wallace Library
  * License:           GPL-2.0+
  * Requires at least: 5.6
@@ -67,7 +67,7 @@ function meetlib_slug( $name ) {
 function meetlib_form_fields() {
 	return array(
 		// Name is not asked: Google's booking form already collects it. Email is kept to match the booking.
-		array( 'key' => 'email',   'label' => 'Your email',                                    'type' => 'email',    'required' => true,  'help' => 'The wheatoncollege.edu or wheatonma.edu address you booked with, so your answers attach to your appointment.' ),
+		array( 'key' => 'email',   'label' => 'Your email',                                    'type' => 'email',    'required' => true,  'help' => 'Your wheatoncollege.edu or wheatonma.edu address. Use the same one when you book your time.' ),
 		array( 'key' => 'help',    'label' => 'How can I help you?',                           'type' => 'textarea', 'required' => true,  'help' => '' ),
 		array( 'key' => 'course',  'label' => 'Is this related to a course? If so, which one?', 'type' => 'text',     'required' => true,  'help' => '' ),
 		array( 'key' => 'due',     'label' => 'If related to a course, when is the assignment due?', 'type' => 'text', 'required' => false, 'help' => '' ),
@@ -333,14 +333,17 @@ function meetlib_handle_request( WP_REST_Request $req ) {
 	foreach ( $meta as $k => $v ) { update_post_meta( $post_id, $k, $v ); }
 
 	// 7. Optional: add the answers to the patron's event on the librarian's Google Calendar.
+	//    The patron books AFTER sending the form, so this first look normally finds nothing;
+	//    the scheduled retries (meetlib_gcal_retry) pick the booking up once it exists.
 	$calendar = meetlib_librarian_email( $lib );
 	$gcal     = meetlib_gcal_annotate( $calendar, $data, $attach_url );
+	update_post_meta( $post_id, '_meetlib_calendar', $calendar );
+	update_post_meta( $post_id, '_meetlib_gcal_tries', 0 );
 	if ( in_array( $gcal, array( 'not_found', 'error' ), true ) ) {
-		// The patron may not have finished booking yet; try once more a little later.
-		wp_schedule_single_event( time() + 15 * MINUTE_IN_SECONDS, 'meetlib_gcal_retry', array( $post_id ) );
+		$delays = meetlib_gcal_retry_delays();
+		wp_schedule_single_event( time() + $delays[0], 'meetlib_gcal_retry', array( $post_id ) );
 		$gcal = 'pending';
 	}
-	update_post_meta( $post_id, '_meetlib_calendar', $calendar );
 	update_post_meta( $post_id, '_meetlib_gcal', $gcal );
 
 	// 8. Email the librarian (best-effort; failure does not fail the request).
@@ -374,12 +377,12 @@ function meetlib_notify( $lib, $data, $attach_url, $gcal = 'off' ) {
 		'Meeting preference: ' . $data['meeting'],
 		'Attachment: ' . ( $attach_url ? $attach_url : '(none)' ),
 		'',
-		'The patron was asked to book a time on your Google appointment page before sending this.',
+		'The patron picks a time on your Google appointment page right after sending this; expect a booking shortly.',
 	);
 	if ( 'added' === $gcal ) {
 		$lines[] = 'These details were also added to the appointment on your Google Calendar.';
 	} elseif ( 'pending' === $gcal ) {
-		$lines[] = 'No matching appointment was on your calendar yet; the plugin will look again in about 15 minutes.';
+		$lines[] = 'Once the booking appears on your calendar, these details will be added to it automatically.';
 	}
 	$headers = array( 'Reply-To: ' . $data['email'] );
 	if ( ! wp_mail( $to, $subject, implode( "\n", $lines ), $headers ) ) {
@@ -561,7 +564,12 @@ function meetlib_gcal_annotate( $calendar_id, $data, $attach_url ) {
 	return 'added';
 }
 
-/** One delayed retry (scheduled by the request handler) for patrons who submitted before booking. */
+/** Seconds after the form submission at which to look for the booking. Patrons book right after sending. */
+function meetlib_gcal_retry_delays() {
+	return array( 5 * MINUTE_IN_SECONDS, 20 * MINUTE_IN_SECONDS, 2 * HOUR_IN_SECONDS, DAY_IN_SECONDS );
+}
+
+/** Scheduled retries (see meetlib_gcal_retry_delays) that annotate the booking once it exists. */
 add_action( 'meetlib_gcal_retry', 'meetlib_gcal_retry', 10, 1 );
 function meetlib_gcal_retry( $post_id ) {
 	$post_id = (int) $post_id;
@@ -575,6 +583,14 @@ function meetlib_gcal_retry( $post_id ) {
 		$data,
 		(string) get_post_meta( $post_id, '_meetlib_attach_url', true )
 	);
+	$tries  = (int) get_post_meta( $post_id, '_meetlib_gcal_tries', true ) + 1;
+	$delays = meetlib_gcal_retry_delays();
+	update_post_meta( $post_id, '_meetlib_gcal_tries', $tries );
+	if ( in_array( $status, array( 'not_found', 'error' ), true ) && isset( $delays[ $tries ] ) ) {
+		// Delays are measured from the submission, so wait only the difference.
+		wp_schedule_single_event( time() + max( MINUTE_IN_SECONDS, $delays[ $tries ] - $delays[ $tries - 1 ] ), 'meetlib_gcal_retry', array( $post_id ) );
+		$status = 'pending';
+	}
 	update_post_meta( $post_id, '_meetlib_gcal', $status );
 }
 
@@ -582,8 +598,8 @@ function meetlib_gcal_retry( $post_id ) {
 function meetlib_gcal_status_label( $status ) {
 	$map = array(
 		'added'       => 'Added to the calendar event',
-		'pending'     => 'Waiting for the booking — will check again shortly',
-		'not_found'   => 'No matching booking found — sent by email only',
+		'pending'     => 'Waiting for the booking to appear on the calendar — checking again later',
+		'not_found'   => 'No matching booking found within a day — sent by email only',
 		'error'       => 'Calendar not reachable (not shared with the integration?) — sent by email only',
 		'no_calendar' => 'Librarian has no email on file — not added',
 		'off'         => 'Calendar integration off — sent by email only',
@@ -1019,7 +1035,13 @@ function meetlib_widget_markup() {
   #meetlib-form-host .meetlib-f__h:focus{outline:none}
   #meetlib-form-host iframe{width:100%;height:720px;border:1px solid var(--meetlib-line);border-radius:8px}
   #meetlib-form-host .meetlib-f__note{background:#eef4fb;border:1px solid #cfe0f2;border-radius:8px;padding:12px 14px;margin-bottom:16px}
-  #meetlib-form-host .meetlib-f__form{margin-top:28px;padding-top:20px;border-top:1px solid var(--meetlib-line)}
+  #meetlib-form-host.meetlib-f__wide{max-width:1100px}
+  #meetlib-form-host .meetlib-f__wrap{display:grid;gap:28px;align-items:start}
+  @media (min-width:960px){#meetlib-form-host .meetlib-f__wrap{grid-template-columns:minmax(300px,400px) minmax(0,1fr)}}
+  #meetlib-form-host h3.meetlib-f__h{font-size:1.1rem}
+  #meetlib-form-host .meetlib-f__cal{position:relative}
+  #meetlib-form-host .meetlib-f__lock{position:absolute;top:0;right:0;bottom:0;left:0;background:rgba(255,255,255,.62);border-radius:8px;display:flex;align-items:center;justify-content:center;padding:20px;text-align:center}
+  #meetlib-form-host .meetlib-f__lock p{margin:0;max-width:320px;background:#fff;border:1px solid var(--meetlib-line);border-radius:8px;padding:12px 16px;font-weight:600;box-shadow:0 2px 10px rgba(0,0,0,.1)}
   #meetlib-form-host .meetlib-f__urgent{margin:12px 0 0;padding:10px 14px;border-left:4px solid var(--meetlib-accent);background:#f5f7fa}
   #meetlib-form-host .meetlib-f__alert{background:#fef3f2;border:1px solid #fecdca;color:#b42318;border-radius:8px;padding:12px 14px;margin-bottom:16px}
   #meetlib-form-host .meetlib-f__alert:empty{display:none}
@@ -1097,34 +1119,41 @@ function fieldHtml(f){
   return '<div class="meetlib-f__field"><label for="'+id+'">'+esc(f.label)+req+'</label>'+ctl+help+err+'</div>';
 }
 function focusEl(n){if(n){n.focus();if(n.scrollIntoView)n.scrollIntoView({behavior:"smooth",block:"start"});}}
-function close(){host.innerHTML="";if(opener&&document.body.contains(opener))opener.focus();}
-/* One screen: the librarian's Google scheduler with the short intake form directly under it.
-   The patron books in the iframe and sends the form in the same pass; there is no "I've booked" gate. */
+function close(){host.innerHTML="";host.classList.remove("meetlib-f__wide");if(opener&&document.body.contains(opener))opener.focus();}
+/* One screen, two panels: the short intake form and the librarian's Google scheduler. The
+   scheduler sits behind a translucent lock until the form is sent, so patrons can see which
+   dates have openings but cannot book without telling the librarian what they need. Booking
+   happens inside Google's iframe, so form-first is the only order the plugin can enforce. */
 function openBooking(i){
   var l=LIST[i];if(!l)return;
   var embed=l.embed||"";
   var cal=embed
-    ? '<iframe src="'+esc(embed)+'" title="'+esc("Available appointment times with "+l.name)+'"></iframe>'
-    : '<p><a class="meetlib-f__submit" href="'+esc(l.booking)+'" target="_blank" rel="noopener">Open '+esc(l.name)+'’s booking page<span class="meetlib-f__sr"> (opens in a new tab)</span></a></p>';
+    ? '<iframe id="meetlib-cal-ctl" src="'+esc(embed)+'" title="'+esc("Available appointment times with "+l.name)+'" tabindex="-1" aria-hidden="true"></iframe>'
+    : '<p><a id="meetlib-cal-ctl" class="meetlib-f__submit" href="'+esc(l.booking)+'" target="_blank" rel="noopener" tabindex="-1" aria-hidden="true">Open '+esc(l.name)+'’s booking page<span class="meetlib-f__sr"> (opens in a new tab)</span></a></p>';
   var urgent=CFG.urgentEmail
     ? '<p class="meetlib-f__urgent">Need an appointment within the next 24 hours? Email <a href="mailto:'+esc(CFG.urgentEmail)+'">'+esc(CFG.urgentEmail)+'</a>.</p>'
     : '';
+  host.classList.add("meetlib-f__wide");
   host.innerHTML=
-     '<section aria-labelledby="meetlib-h1">'
-    +'<h2 class="meetlib-f__h" id="meetlib-h1" tabindex="-1">Book an appointment with '+esc(l.name)+'</h2>'
-    +'<p class="meetlib-f__note">Pick a date and time'+(embed?' below':'')+', then use the short form underneath to tell '+esc(l.name)+' what you’d like help with.</p>'
-    +cal+urgent
-    +'</section>'
+     '<h2 class="meetlib-f__h" id="meetlib-h1" tabindex="-1">Book an appointment with '+esc(l.name)+'</h2>'
+    +'<p class="meetlib-f__note">Tell '+esc(l.name)+' what you’d like help with, then pick a date and time. '+(embed?'Available dates are shown on the calendar.':'')+'</p>'
+    +'<div class="meetlib-f__wrap">'
     +'<section class="meetlib-f__form" aria-labelledby="meetlib-h2">'
-    +'<h2 class="meetlib-f__h" id="meetlib-h2" tabindex="-1">Tell '+esc(l.name)+' what you need</h2>'
+    +'<h3 class="meetlib-f__h" id="meetlib-h2" tabindex="-1">1. What do you need?</h3>'
     +'<div id="meetlib-form-body">'
     +'<div class="meetlib-f__alert" id="meetlib-alert" role="alert"></div>'
     +'<p class="meetlib-f__help">Fields marked with <span class="meetlib-f__req">*</span> are required.</p>'
     +'<form id="meetlib-f" novalidate>'+CFG.fields.map(fieldHtml).join("")
     +'<div aria-hidden="true" style="position:absolute;left:-9999px"><label>Leave this empty <input type="text" name="website" tabindex="-1" autocomplete="off"></label></div>'
-    +'<div class="meetlib-f__actions"><button type="submit" class="meetlib-f__submit">Send</button>'
+    +'<div class="meetlib-f__actions"><button type="submit" class="meetlib-f__submit">Send and pick a time</button>'
     +'<button type="button" class="meetlib-f__cancel" id="meetlib-cancel">Cancel</button></div></form>'
-    +'</div></section>';
+    +'</div></section>'
+    +'<section aria-labelledby="meetlib-h3">'
+    +'<h3 class="meetlib-f__h" id="meetlib-h3" tabindex="-1">2. Pick a time</h3>'
+    +'<div class="meetlib-f__cal">'+cal
+    +'<div class="meetlib-f__lock" id="meetlib-lock"><p>Send the form first, then pick your time here.</p></div>'
+    +'</div>'+urgent
+    +'</section></div>';
   byId("meetlib-cancel").addEventListener("click",close);
   byId("meetlib-f").addEventListener("submit",function(e){e.preventDefault();submitForm(i);});
   focusEl(byId("meetlib-h1"));
@@ -1176,7 +1205,7 @@ function submitForm(i){
     if(!res.ok){throw new Error(res.j&&res.j.message?res.j.message:"Something went wrong sending your details.");}
     showDone(l,res.j);
   }).catch(function(err){
-    btn.disabled=false;btn.textContent="Send";
+    btn.disabled=false;btn.textContent="Send and pick a time";
     var a=byId("meetlib-alert");
     a.innerHTML=esc(err.message)+' If this keeps happening, '
       +(l.email?'email <a href="mailto:'+esc(l.email)+'">'+esc(l.email)+'</a> directly.':'email the librarian directly.');
@@ -1184,13 +1213,13 @@ function submitForm(i){
   });
 }
 function showDone(l,resp){
-  var added=resp&&resp.calendar==="added";
-  byId("meetlib-h2").textContent="Sent";
-  byId("meetlib-form-body").innerHTML='<p class="meetlib-f__note">Thanks! Your details were sent to <strong>'+esc(l.name)+'</strong>'
-    +(added?' and added to your appointment on their calendar.':'.')
-    +' Google will email you a confirmation for the time you booked.'
-    +(added?'':' Haven’t picked a time yet? Choose one above.')+'</p>';
-  focusEl(byId("meetlib-h2"));
+  var lock=byId("meetlib-lock"), ctl=byId("meetlib-cal-ctl");
+  if(lock&&lock.parentNode)lock.parentNode.removeChild(lock);
+  if(ctl){ctl.removeAttribute("tabindex");ctl.removeAttribute("aria-hidden");}
+  byId("meetlib-h2").textContent="1. Sent ✓";
+  byId("meetlib-form-body").innerHTML='<p class="meetlib-f__note">Thanks! Your details were sent to <strong>'+esc(l.name)+'</strong>. '
+    +'Now pick your date and time'+(ctl&&ctl.tagName==="IFRAME"?' on the calendar':'')+'. Use the same email address when you book so your answers attach to the appointment.</p>';
+  focusEl(byId("meetlib-h3"));
 }
 })();
 </script>

@@ -6,9 +6,9 @@ display the directory anywhere with the `[meet_a_librarian]` shortcode. Replaces
 Appointments.
 
 - Per-librarian booking links and subject specialties
-- Patrons pick a time on the librarian's embedded Google appointment schedule and answer a few
-  short questions on the same screen; the answers are emailed to the librarian and kept under
-  **Appointment Requests** in wp-admin
+- Patrons answer a few short questions, then pick a time on the librarian's embedded Google
+  appointment schedule on the same screen (the calendar unlocks once the questions are sent);
+  the answers are emailed to the librarian and kept under **Appointment Requests** in wp-admin
 - Optional Google Calendar integration adds the patron's answers to the booked event
 - Deep-linkable per-librarian widget for embedding elsewhere
 - No custom database tables — the roster lives in a WordPress option, requests in a private post type
