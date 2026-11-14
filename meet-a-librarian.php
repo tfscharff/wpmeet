@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Meet With a Librarian
  * Description:        No-code "Meet With a Librarian" directory: staff manage librarians and their Google appointment booking links under Meet With a Librarian in wp-admin and click Save. Show the directory anywhere with the [meet_a_librarian] shortcode. Replaces LibCal appointments.
- * Version:           2.4.2
+ * Version:           2.4.3
  * Author:            Madeleine Clark Wallace Library
  * License:           GPL-2.0+
  * Requires at least: 5.6
@@ -593,23 +593,26 @@ function meetlib_gcal_annotate( $calendar_id, $data, $attach_url, &$when = '', $
 		error_log( 'meet-a-librarian: could not update event on ' . $calendar_id . ': ' . $patch->get_error_message() );
 		return 'error';
 	}
-	$when = meetlib_gcal_when( $best['start'] );
+	$when = meetlib_gcal_when( $best['start'], isset( $list['timeZone'] ) ? (string) $list['timeZone'] : '' );
 	return 'added';
 }
 
 /**
  * Readable start time of a Calendar event in the event's own time zone (the librarian's), not the
  * site's: many WordPress installs are left on UTC, and changing that setting affects the whole site.
+ * Preference: the event's own timeZone, then the calendar's ($calendar_tz, the events list's
+ * top-level timeZone), then the offset in dateTime, which Google may send as UTC ("…Z").
  */
-function meetlib_gcal_when( $start ) {
+function meetlib_gcal_when( $start, $calendar_tz = '' ) {
 	$start = is_array( $start ) ? $start : array();
 	if ( ! empty( $start['dateTime'] ) ) {
 		$raw = (string) $start['dateTime'];
 		try {
-			$dt = new DateTime( $raw ); // RFC 3339 carries the offset, e.g. 2026-11-13T11:00:00-05:00
+			$dt = new DateTime( $raw );
 			$tz = $dt->getTimezone();
-			if ( ! empty( $start['timeZone'] ) ) {
-				try { $tz = new DateTimeZone( (string) $start['timeZone'] ); } catch ( Exception $e ) { /* keep the offset */ }
+			foreach ( array( isset( $start['timeZone'] ) ? (string) $start['timeZone'] : '', (string) $calendar_tz ) as $name ) {
+				if ( '' === $name ) { continue; }
+				try { $tz = new DateTimeZone( $name ); break; } catch ( Exception $e ) { /* try the next */ }
 			}
 			return wp_date( 'l, F j \a\t g:i a', $dt->getTimestamp(), $tz );
 		} catch ( Exception $e ) {
