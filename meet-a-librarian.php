@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Meet With a Librarian
  * Description:        No-code "Meet With a Librarian" directory: staff manage librarians and their Google appointment booking links under Meet With a Librarian in wp-admin and click Save. Show the directory anywhere with the [meet_a_librarian] shortcode. Replaces LibCal appointments.
- * Version:           2.4.1
+ * Version:           2.4.2
  * Author:            Madeleine Clark Wallace Library
  * License:           GPL-2.0+
  * Requires at least: 5.6
@@ -593,14 +593,34 @@ function meetlib_gcal_annotate( $calendar_id, $data, $attach_url, &$when = '', $
 		error_log( 'meet-a-librarian: could not update event on ' . $calendar_id . ': ' . $patch->get_error_message() );
 		return 'error';
 	}
-	if ( ! empty( $best['start']['dateTime'] ) ) {
-		$ts   = strtotime( $best['start']['dateTime'] );
-		$when = $ts ? wp_date( 'l, F j \a\t g:i a', $ts ) : (string) $best['start']['dateTime'];
-	} elseif ( ! empty( $best['start']['date'] ) ) {
-		$ts   = strtotime( $best['start']['date'] );
-		$when = $ts ? wp_date( 'l, F j', $ts ) : (string) $best['start']['date'];
-	}
+	$when = meetlib_gcal_when( $best['start'] );
 	return 'added';
+}
+
+/**
+ * Readable start time of a Calendar event in the event's own time zone (the librarian's), not the
+ * site's: many WordPress installs are left on UTC, and changing that setting affects the whole site.
+ */
+function meetlib_gcal_when( $start ) {
+	$start = is_array( $start ) ? $start : array();
+	if ( ! empty( $start['dateTime'] ) ) {
+		$raw = (string) $start['dateTime'];
+		try {
+			$dt = new DateTime( $raw ); // RFC 3339 carries the offset, e.g. 2026-11-13T11:00:00-05:00
+			$tz = $dt->getTimezone();
+			if ( ! empty( $start['timeZone'] ) ) {
+				try { $tz = new DateTimeZone( (string) $start['timeZone'] ); } catch ( Exception $e ) { /* keep the offset */ }
+			}
+			return wp_date( 'l, F j \a\t g:i a', $dt->getTimestamp(), $tz );
+		} catch ( Exception $e ) {
+			return $raw;
+		}
+	}
+	if ( ! empty( $start['date'] ) ) { // all-day event: a calendar date, no time zone
+		$ts = strtotime( (string) $start['date'] . ' 00:00:00 UTC' );
+		return $ts ? wp_date( 'l, F j', $ts, new DateTimeZone( 'UTC' ) ) : (string) $start['date'];
+	}
+	return '';
 }
 
 /** Seconds after the form submission at which to look for the booking. Patrons book right after sending. */
