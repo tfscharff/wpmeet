@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Meet With a Librarian
  * Description:        No-code "Meet With a Librarian" directory: staff manage librarians and their Google appointment booking links under Meet With a Librarian in wp-admin and click Save. Show the directory anywhere with the [meet_a_librarian] shortcode. Replaces LibCal appointments.
- * Version:           2.4.0
+ * Version:           2.4.1
  * Author:            Madeleine Clark Wallace Library
  * License:           GPL-2.0+
  * Requires at least: 5.6
@@ -337,7 +337,7 @@ function meetlib_handle_request( WP_REST_Request $req ) {
 	//    the scheduled retries (meetlib_gcal_retry) pick the booking up once it exists.
 	$calendar = meetlib_librarian_email( $lib );
 	$when     = '';
-	$gcal     = meetlib_gcal_annotate( $calendar, $data, $attach_url, $when );
+	$gcal     = meetlib_gcal_annotate( $calendar, $data, $attach_url, $when, time() );
 	update_post_meta( $post_id, '_meetlib_calendar', $calendar );
 	update_post_meta( $post_id, '_meetlib_when', $when );
 	update_post_meta( $post_id, '_meetlib_gcal_tries', 0 );
@@ -535,10 +535,16 @@ function meetlib_gcal_details_html( $data, $attach_url ) {
  * Find the patron's upcoming event on the librarian's calendar and append the answers.
  * Returns: added | not_found | error | no_calendar | off. On `added`, $when receives the
  * appointment's start as readable local text (e.g. "Tuesday, November 11 at 2:00 pm").
+ *
+ * $since is the submission time (Unix). Patrons can only book after sending the form, so an event
+ * created before then is never their booking. This, plus skipping the calendar owner's own guest
+ * entry, keeps a librarian testing with their own address from annotating their other meetings.
  */
-function meetlib_gcal_annotate( $calendar_id, $data, $attach_url, &$when = '' ) {
+function meetlib_gcal_annotate( $calendar_id, $data, $attach_url, &$when = '', $since = 0 ) {
 	if ( ! meetlib_gcal_enabled() ) { return 'off'; }
 	if ( '' === (string) $calendar_id ) { return 'no_calendar'; }
+	if ( 0 === strcasecmp( (string) $calendar_id, (string) $data['email'] ) ) { return 'not_found'; }
+	$earliest = ( $since ? (int) $since : time() ) - 5 * MINUTE_IN_SECONDS; // slack for clock skew
 
 	$path = meetlib_gcal_events_path( $calendar_id );
 	$list = meetlib_gcal_api( 'GET', $path, array(
@@ -560,12 +566,15 @@ function meetlib_gcal_annotate( $calendar_id, $data, $attach_url, &$when = '' ) 
 		if ( isset( $ev['status'] ) && 'cancelled' === $ev['status'] ) { continue; }
 		$desc = isset( $ev['description'] ) ? (string) $ev['description'] : '';
 		if ( false !== strpos( $desc, MEETLIB_GCAL_MARKER ) ) { continue; }
+		$created = isset( $ev['created'] ) ? (string) $ev['created'] : '';
+		$ts      = '' !== $created ? strtotime( $created ) : false;
+		if ( ! $ts || $ts < $earliest ) { continue; }
 		$guest = false;
 		foreach ( ( isset( $ev['attendees'] ) && is_array( $ev['attendees'] ) ) ? $ev['attendees'] : array() as $a ) {
+			if ( ! empty( $a['self'] ) || ! empty( $a['organizer'] ) ) { continue; }
 			if ( isset( $a['email'] ) && 0 === strcasecmp( $a['email'], $data['email'] ) ) { $guest = true; break; }
 		}
 		if ( ! $guest ) { continue; }
-		$created = isset( $ev['created'] ) ? (string) $ev['created'] : '';
 		if ( null === $best || strcmp( $created, (string) $best['created'] ) > 0 ) {
 			$best            = $ev;
 			$best['created'] = $created;
@@ -616,7 +625,7 @@ function meetlib_gcal_retry( $post_id ) {
 	$calendar = (string) get_post_meta( $post_id, '_meetlib_calendar', true );
 	$attach   = (string) get_post_meta( $post_id, '_meetlib_attach_url', true );
 	$when     = '';
-	$status   = meetlib_gcal_annotate( $calendar, $data, $attach, $when );
+	$status   = meetlib_gcal_annotate( $calendar, $data, $attach, $when, (int) get_post_time( 'U', true, $post_id ) );
 	$tries    = (int) get_post_meta( $post_id, '_meetlib_gcal_tries', true ) + 1;
 	$delays   = meetlib_gcal_retry_delays();
 	update_post_meta( $post_id, '_meetlib_gcal_tries', $tries );
