@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Meet With a Librarian
  * Description:        No-code "Meet With a Librarian" directory: staff manage librarians and their Google appointment booking links under Meet With a Librarian in wp-admin and click Save. Show the directory anywhere with the [meet_a_librarian] shortcode. Replaces LibCal appointments.
- * Version:           2.4.3
+ * Version:           2.4.4
  * Author:            Madeleine Clark Wallace Library
  * License:           GPL-2.0+
  * Requires at least: 5.6
@@ -539,12 +539,16 @@ function meetlib_gcal_details_html( $data, $attach_url ) {
  * $since is the submission time (Unix). Patrons can only book after sending the form, so an event
  * created before then is never their booking. This, plus skipping the calendar owner's own guest
  * entry, keeps a librarian testing with their own address from annotating their other meetings.
+ * No clock-skew slack and oldest-first: when one patron sends two forms back to back, each
+ * submission takes the first untagged booking made after it, so the answers aren't swapped (an
+ * earlier booking is either already tagged or predates the later submission). A missed match
+ * fails safe ("no booking found" email); a wrong match edits the wrong event.
  */
 function meetlib_gcal_annotate( $calendar_id, $data, $attach_url, &$when = '', $since = 0 ) {
 	if ( ! meetlib_gcal_enabled() ) { return 'off'; }
 	if ( '' === (string) $calendar_id ) { return 'no_calendar'; }
 	if ( 0 === strcasecmp( (string) $calendar_id, (string) $data['email'] ) ) { return 'not_found'; }
-	$earliest = ( $since ? (int) $since : time() ) - 5 * MINUTE_IN_SECONDS; // slack for clock skew
+	$earliest = $since ? (int) $since : time();
 
 	$path = meetlib_gcal_events_path( $calendar_id );
 	$list = meetlib_gcal_api( 'GET', $path, array(
@@ -559,8 +563,9 @@ function meetlib_gcal_annotate( $calendar_id, $data, $attach_url, &$when = '', $
 		return 'error';
 	}
 
-	// Newest-created upcoming event with the patron as a guest that we haven't already annotated.
-	$best = null;
+	// Oldest event created since the submission with the patron as a guest, not yet annotated.
+	$best    = null;
+	$best_ts = 0;
 	$items = isset( $list['items'] ) && is_array( $list['items'] ) ? $list['items'] : array();
 	foreach ( $items as $ev ) {
 		if ( isset( $ev['status'] ) && 'cancelled' === $ev['status'] ) { continue; }
@@ -575,9 +580,9 @@ function meetlib_gcal_annotate( $calendar_id, $data, $attach_url, &$when = '', $
 			if ( isset( $a['email'] ) && 0 === strcasecmp( $a['email'], $data['email'] ) ) { $guest = true; break; }
 		}
 		if ( ! $guest ) { continue; }
-		if ( null === $best || strcmp( $created, (string) $best['created'] ) > 0 ) {
-			$best            = $ev;
-			$best['created'] = $created;
+		if ( null === $best || $ts < $best_ts ) {
+			$best    = $ev;
+			$best_ts = $ts;
 		}
 	}
 	if ( ! $best ) { return 'not_found'; }
