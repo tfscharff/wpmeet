@@ -335,7 +335,7 @@ eq( meetlib_embed_url( 'https://calendar.google.com/calendar/appointments/schedu
 eq( meetlib_embed_url( 'https://calendar.google.com/calendar/u/0/appointments/schedules/AAA' ), 'https://calendar.google.com/calendar/appointments/schedules/AAA?gv=true', '27 /u/0/ link' );
 eq( meetlib_embed_url( 'https://calendar.google.com/calendar/appointments/schedules/AAA?gv=true' ), 'https://calendar.google.com/calendar/appointments/schedules/AAA?gv=true', '27 already an embed link' );
 eq( meetlib_embed_url( 'https://calendar.google.com/calendar/appointments/AAA?x=1#top' ), 'https://calendar.google.com/calendar/appointments/AAA?x=1&gv=true#top', '27 query and fragment' );
-eq( meetlib_embed_url( 'https://calendar.app.google/short' ), '', '27 short link is not embeddable' );
+eq( meetlib_embed_url( 'https://calendar.app.google/short' ), '', '27 short link is not embeddable until it has been looked up' );
 eq( meetlib_embed_url( '' ), '', '27 empty' );
 
 // 28. Saving the directory: empty is refused, the previous version is kept and can be found.
@@ -362,6 +362,119 @@ $GLOBALS['T']['posts'][ $id ]['status'] = 'trash';
 t_event( CAL, 'book1', $now - 200, STU );
 meetlib_gcal_retry( $id, true );
 eq( t_desc( CAL, 'book1' ), '', '30 trashed request is not processed' );
+
+// 31. Short Google links: looked up once, then embeddable; a failed lookup stays a plain link and is reported.
+t_reset();
+$short = 'https://calendar.app.google/short';
+eq( meetlib_links_pending(), array( $short ), '31 the short link is waiting for a lookup' );
+meetlib_resolve_links();
+eq( meetlib_embed_url( $short ), '', '31 a failed lookup leaves the link non-embeddable' );
+ok( (bool) preg_grep( '/short booking link/', meetlib_health() ), '31 failed lookup is reported' );
+eq( meetlib_links_pending(), array(), '31 a failed lookup is not retried straight away' );
+$l = get_option( 'meetlib_links' ); $l[ $short ]['t'] = time() - 2 * HOUR_IN_SECONDS; update_option( 'meetlib_links', $l );
+$GLOBALS['T']['g']['redirects'][ $short ] = 'https://calendar.google.com/appointments/schedules/AcZ_x-9';
+meetlib_resolve_links();
+eq( meetlib_embed_url( $short ), 'https://calendar.google.com/calendar/appointments/schedules/AcZ_x-9?gv=true', '31 resolved short link is embeddable' );
+eq( count( preg_grep( '/short booking link/', meetlib_health() ) ), 0, '31 warning clears once resolved' );
+$rows = meetlib_public_roster();
+eq( $rows[1]['booking'], $short, '31 the directory still holds the link the librarian pasted' );
+has( $rows[1]['embed'], 'AcZ_x-9?gv=true', '31 public roster carries the embed address' );
+$calls = count( $GLOBALS['T']['g']['calls'] );
+meetlib_public_roster(); meetlib_resolve_links();
+eq( count( $GLOBALS['T']['g']['calls'] ), $calls, '31 a resolved link is never looked up again' );
+
+// 32. The lookup follows a second hop, refuses other hosts, and refuses non-schedule answers.
+t_reset();
+$GLOBALS['T']['g']['redirects'] = array(
+	'https://calendar.app.google/hop'  => 'https://calendar.google.com/calendar/r/hop2',
+	'https://calendar.google.com/calendar/r/hop2' => 'https://calendar.google.com/calendar/u/0/appointments/schedules/BBB?x=1',
+	'https://calendar.app.google/evil' => 'https://evil.example/calendar/appointments/schedules/CCC',
+	'https://calendar.app.google/home' => 'https://calendar.google.com/calendar/r',
+);
+eq( meetlib_resolve_short( 'https://calendar.app.google/hop' ), 'https://calendar.google.com/calendar/appointments/schedules/BBB', '32 second hop followed' );
+eq( meetlib_resolve_short( 'https://calendar.app.google/evil' ), '', '32 another host is refused' );
+eq( meetlib_resolve_short( 'https://calendar.app.google/home' ), '', '32 a non-schedule page is refused' );
+eq( meetlib_resolve_short( 'https://evil.example/x' ), '', '32 only short Google links are ever requested' );
+ok( ! in_array( 'HEAD https://evil.example/calendar/appointments/schedules/CCC', $GLOBALS['T']['g']['calls'], true ), '32 the other host was never contacted' );
+
+// 33. Saving the directory looks up a newly pasted short link.
+t_reset();
+$GLOBALS['T']['g']['redirects']['https://calendar.app.google/new1'] = 'https://calendar.google.com/appointments/schedules/NEW1';
+meetlib_save_roster( new WP_REST_Request( array( 'librarians' => array( array( 'name' => 'New Person', 'booking' => 'https://calendar.app.google/new1' ) ) ) ) );
+$rows = meetlib_public_roster();
+has( $rows[0]['embed'], 'schedules/NEW1?gv=true', '33 embeddable right after saving' );
+eq( array_keys( get_option( 'meetlib_links' ) ), array( 'https://calendar.app.google/new1' ), '33 links no longer in the directory are forgotten' );
+
+// 34. Booked under another address: the email carries a link, and confirming it attaches the answers.
+t_reset();
+$id = submit( 600 );
+t_event( CAL, 'gmailbook', $now - 500, array( 'student.personal@gmail.com' ), array( 'description' => 'Booked by Sam' ) );
+for ( $i = 0; $i < 6; $i++ ) { meetlib_gcal_retry( $id, true ); }
+$key = get_post_meta( $id, '_meetlib_attach_key', true );
+ok( strlen( $key ) >= 32, '34 a key was made for the link' );
+has( last_mail()['body'], 'wp-json/meet-a-librarian/v1/attach?r=' . $id . '&b=0&k=' . $key, '34 email carries the link' );
+$r = meetlib_attach_handle( $id, 0, $key, false );
+eq( $r['state'], 'ask', '34 opening the link only asks' );
+eq( t_desc( CAL, 'gmailbook' ), 'Booked by Sam', '34 opening the link writes nothing' );
+eq( st( $id ), 'not_found', '34 opening the link changes nothing' );
+has( meetlib_attach_page( $r, 'https://example.edu/x' ), 'student.personal@gmail.com', '34 the page names the booking address' );
+has( meetlib_attach_page( $r, 'https://example.edu/x' ), '<button type="submit">', '34 the page has the confirm button' );
+foreach ( array( 'wrong key' => array( $id, 0, 'nope' ), 'empty key' => array( $id, 0, '' ), 'wrong booking' => array( $id, 5, $key ), 'wrong request' => array( $id + 50, 0, $key ) ) as $what => $a ) {
+	$bad = meetlib_attach_handle( $a[0], $a[1], $a[2], true );
+	eq( $bad['state'], 'invalid', "34 refused: $what" );
+	lacks( meetlib_attach_page( $bad, '' ), STU, "34 ($what) page reveals nothing about the request" );
+}
+eq( t_desc( CAL, 'gmailbook' ), 'Booked by Sam', '34 refused attempts write nothing' );
+$r = meetlib_attach_handle( $id, 0, $key, true );
+eq( $r['state'], 'done', '34 confirming attaches' );
+has( t_desc( CAL, 'gmailbook' ), 'Booked by Sam<br><br><b>Meet With a Librarian request</b>', '34 answers appended after the existing description' );
+has( t_desc( CAL, 'gmailbook' ), 'Finding sources', '34 answers are on the booking' );
+eq( st( $id ), 'added', '34 request is now booked' );
+eq( get_post_meta( $id, '_meetlib_when', true ), 'Tuesday, November 17 at 2:00 pm', '34 appointment time recorded' );
+eq( get_post_meta( $id, '_meetlib_confirmed_as', true ), 'student.personal@gmail.com', '34 records who it was booked as' );
+eq( count( mails() ), 1, '34 no second email' );
+$r = meetlib_attach_handle( $id, 0, $key, true );
+eq( $r['state'], 'already', '34 a second click does nothing' );
+eq( substr_count( t_desc( CAL, 'gmailbook' ), 'Meet With a Librarian request' ), 1, '34 answers are not added twice' );
+
+// 35. Confirming is refused when the booking is gone, cancelled, already has answers, or lost its guest.
+$cases = array(
+	'deleted'   => function () { unset( $GLOBALS['T']['g']['cals'][ CAL ]['events']['gmailbook'] ); },
+	'cancelled' => function () { $GLOBALS['T']['g']['cals'][ CAL ]['events']['gmailbook']['status'] = 'cancelled'; },
+	'tagged'    => function () { $GLOBALS['T']['g']['cals'][ CAL ]['events']['gmailbook']['description'] = '<b>Meet With a Librarian request</b> other patron'; },
+	'new guest' => function () { $GLOBALS['T']['g']['cals'][ CAL ]['events']['gmailbook']['attendees'][1]['email'] = 'someone.else@gmail.com'; },
+	'outage'    => function () { $GLOBALS['T']['g']['fail'] = 503; },
+	'conflict'  => function () { $GLOBALS['T']['g']['patch_fail'] = 412; },
+);
+foreach ( $cases as $what => $break ) {
+	t_reset();
+	$id = submit( 600 );
+	t_event( CAL, 'gmailbook', $now - 500, array( 'student.personal@gmail.com' ) );
+	for ( $i = 0; $i < 6; $i++ ) { meetlib_gcal_retry( $id, true ); }
+	$break();
+	$before = isset( $GLOBALS['T']['g']['cals'][ CAL ]['events']['gmailbook'] ) ? t_desc( CAL, 'gmailbook' ) : null;
+	$r = meetlib_attach_handle( $id, 0, get_post_meta( $id, '_meetlib_attach_key', true ), true );
+	eq( $r['state'], 'failed', "35 ($what) refused" );
+	ok( '' !== $r['msg'], "35 ($what) says why" );
+	eq( st( $id ), 'not_found', "35 ($what) request unchanged" );
+	eq( isset( $GLOBALS['T']['g']['cals'][ CAL ]['events']['gmailbook'] ) ? t_desc( CAL, 'gmailbook' ) : null, $before, "35 ($what) booking unchanged" );
+	eq( get_post_meta( $id, '_meetlib_lock', true ), '', "35 ($what) lock released" );
+}
+
+// 36. A request that was matched normally has no link, and one from before 2.6 (text hints only) still emails.
+t_reset();
+$id = submit( 600 );
+t_event( CAL, 'book1', $now - 500, STU );
+meetlib_gcal_retry( $id );
+lacks( last_mail()['body'], '/attach?', '36 matched request has no attach link' );
+eq( meetlib_attach_handle( $id, 0, '', true )['state'], 'invalid', '36 no key, no attaching' );
+t_reset();
+$id = submit( 600 );
+update_post_meta( $id, '_meetlib_gcal', 'not_found' );
+update_post_meta( $id, '_meetlib_hints', array( 'Tuesday at 2:00 pm (booked as old@gmail.com)' ) );
+meetlib_notify( $id );
+has( last_mail()['body'], 'booked as old@gmail.com', '36 pre-2.6 hints still listed' );
+lacks( last_mail()['body'], '/attach?', '36 pre-2.6 hints have no link' );
 
 echo $GLOBALS['fails'] ? "\n{$GLOBALS['fails']} FAILED, {$GLOBALS['passes']} passed\n" : "All {$GLOBALS['passes']} checks passed\n";
 exit( $GLOBALS['fails'] ? 1 : 0 );

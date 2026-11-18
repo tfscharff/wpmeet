@@ -8,7 +8,7 @@ function t_reset() {
 	$GLOBALS['T'] = array(
 		'options' => array(), 'transients' => array(), 'posts' => array(), 'meta' => array(), 'next_id' => 100,
 		'mails' => array(), 'mail_ok' => true, 'cron' => array(),
-		'g' => array( 'skew' => 0, 'fail' => 0, 'patch_fail' => 0, 'cals' => array(), 'calls' => array() ),
+		'g' => array( 'skew' => 0, 'fail' => 0, 'patch_fail' => 0, 'cals' => array(), 'calls' => array(), 'redirects' => array() ),
 	);
 	unset( $GLOBALS['meetlib_gcal_skew'] );
 	update_option( 'meetlib_gcal_key', json_encode( array( 'client_email' => 'svc@proj.iam.gserviceaccount.com', 'private_key' => 'x' ) ) );
@@ -120,6 +120,9 @@ function wp_max_upload_size() { return 64 * 1024 * 1024; }
 function home_url( $p = '' ) { return 'https://example.edu' . $p; }
 function wp_get_current_user() { return (object) array( 'user_login' => 'tester' ); }
 function wp_set_current_user( $id ) {}
+function wp_generate_password( $len = 12, $special = true ) { return substr( str_repeat( md5( 'k' . count( $GLOBALS['T']['meta'] ) . mt_rand() ), 4 ), 0, $len ); }
+function add_query_arg( $args, $url ) { return $url . ( false === strpos( $url, '?' ) ? '?' : '&' ) . http_build_query( $args ); }
+if ( ! function_exists( 'rest_url' ) ) { function rest_url( $p = '' ) { return 'https://example.edu/wp-json/' . $p; } }
 
 /* ---------------- fake Google Calendar ---------------- */
 
@@ -142,11 +145,20 @@ function wp_remote_post( $url, $args ) { return t_reply( 200, array( 'access_tok
 function wp_remote_request( $url, $args ) {
 	$g = &$GLOBALS['T']['g'];
 	$g['calls'][] = $args['method'] . ' ' . $url;
+	if ( false === strpos( $url, 'googleapis.com' ) ) { // a booking link being followed: answer from the redirect table
+		return isset( $g['redirects'][ $url ] )
+			? array( 'code' => 302, 'body' => '', 'headers' => array( 'location' => $g['redirects'][ $url ] ) )
+			: array( 'code' => 404, 'body' => '', 'headers' => array() );
+	}
 	if ( $g['fail'] ) { return t_reply( $g['fail'], array( 'error' => array( 'errors' => array( array( 'reason' => 'backendError' ) ) ) ) ); }
 	if ( ! preg_match( '#/calendars/([^/]+)/events(?:/([^?]+))?(?:\?(.*))?$#', $url, $m ) ) { return t_reply( 400, array() ); }
 	$cal = rawurldecode( $m[1] );
 	if ( ! isset( $g['cals'][ $cal ] ) ) { return t_reply( 404, array( 'error' => array( 'errors' => array( array( 'reason' => 'notFound' ) ) ) ) ); }
 	$c = &$g['cals'][ $cal ];
+	if ( 'GET' === $args['method'] && ! empty( $m[2] ) ) { // one event
+		$id = rawurldecode( $m[2] );
+		return isset( $c['events'][ $id ] ) ? t_reply( 200, $c['events'][ $id ] ) : t_reply( 404, array( 'error' => array( 'errors' => array( array( 'reason' => 'notFound' ) ) ) ) );
+	}
 	if ( 'GET' === $args['method'] ) {
 		parse_str( isset( $m[3] ) ? $m[3] : '', $q );
 		$min   = isset( $q['updatedMin'] ) ? strtotime( $q['updatedMin'] ) : 0;

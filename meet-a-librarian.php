@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Meet With a Librarian
  * Description:        No-code "Meet With a Librarian" directory: staff manage librarians and their Google appointment booking links under Meet With a Librarian in wp-admin and click Save. Show the directory anywhere with the [meet_a_librarian] shortcode. Replaces LibCal appointments.
- * Version:           2.5.0
+ * Version:           2.6.0
  * Author:            Madeleine Clark Wallace Library
  * License:           GPL-2.0+
  * Requires at least: 5.6
@@ -18,6 +18,7 @@ define( 'MEETLIB_DB_VERSION', 3 );
 define( 'MEETLIB_BACKUP_OPTION', 'meetlib_librarians_backup' );
 define( 'MEETLIB_GCAL_OPTION', 'meetlib_gcal_key' );
 define( 'MEETLIB_GCAL_MARKER', 'Meet With a Librarian request' );
+define( 'MEETLIB_LINKS_OPTION', 'meetlib_links' );
 
 /**
  * Storage upgrades, run once each on init before the CPT is registered.
@@ -136,13 +137,20 @@ function meetlib_max_upload_label() {
 
 /**
  * Normalize a Google appointment-schedule link to its inline embed URL, or '' if not embeddable.
- * Only calendar.google.com/calendar/appointments/... pages support the ?gv=true inline embed
- * (not the short calendar.app.google links). A /u/0/ account segment copied from the librarian's
- * own address bar is dropped: it means "my first signed-in account" and is wrong for patrons.
+ * Only calendar.google.com/calendar/appointments/... pages support the ?gv=true inline embed.
+ * A short calendar.app.google link is swapped for the full link the site looked up earlier
+ * (meetlib_resolve_links); until that lookup has succeeded it is not embeddable. A /u/0/ account
+ * segment copied from the librarian's own address bar is dropped: it means "my first signed-in
+ * account" and is wrong for patrons. Never contacts Google: it runs on public page loads.
  */
 function meetlib_embed_url( $booking ) {
 	$booking = trim( (string) $booking );
 	if ( '' === $booking ) { return ''; }
+	if ( meetlib_is_short_link( $booking ) ) {
+		$links   = meetlib_links();
+		$booking = isset( $links[ $booking ]['url'] ) ? (string) $links[ $booking ]['url'] : '';
+		if ( '' === $booking ) { return ''; }
+	}
 	$booking = preg_replace( '#(calendar\.google\.com/calendar)/u/\d+/(appointments)#i', '$1/$2', $booking );
 	if ( false === strpos( $booking, 'calendar.google.com/calendar/appointments' ) ) { return ''; }
 	if ( false !== strpos( $booking, 'gv=true' ) ) { return $booking; }
@@ -150,6 +158,99 @@ function meetlib_embed_url( $booking ) {
 	$at   = strpos( $booking, '#' );
 	if ( false !== $at ) { $hash = substr( $booking, $at ); $booking = substr( $booking, 0, $at ); }
 	return $booking . ( ( false === strpos( $booking, '?' ) ) ? '?gv=true' : '&gv=true' ) . $hash;
+}
+
+/* ------------------------------------------------------------------ *
+ *  Short Google booking links (calendar.app.google/...)
+ *
+ *  Google's "Share" button hands out a short link, which cannot be shown inside a page. It
+ *  redirects to the full appointment-schedule link, which can. The site follows that redirect
+ *  once per link (on save, and in the background after an upgrade) and remembers the answer in
+ *  MEETLIB_LINKS_OPTION as short => { url, t }; url is '' when the lookup failed (retried hourly).
+ *  The roster keeps whatever the librarian pasted.
+ * ------------------------------------------------------------------ */
+
+function meetlib_is_short_link( $url ) {
+	return (bool) preg_match( '#^https://calendar\.app\.google/[A-Za-z0-9_-]+/?$#', trim( (string) $url ) );
+}
+
+/** The canonical full link for a Google appointment-schedule address, or '' if $url is not one. */
+function meetlib_schedule_url( $url ) {
+	if ( preg_match( '#^https://calendar\.google\.com/(?:calendar/)?(?:u/\d+/)?appointments/schedules/([A-Za-z0-9_-]+)#', trim( (string) $url ), $m ) ) {
+		return 'https://calendar.google.com/calendar/appointments/schedules/' . $m[1];
+	}
+	return '';
+}
+
+function meetlib_links() {
+	$v = get_option( MEETLIB_LINKS_OPTION );
+	return is_array( $v ) ? $v : array();
+}
+
+/**
+ * Follow a short link to its full appointment-schedule link; '' on any failure. Only ever requests
+ * Google's two calendar hosts, and only accepts an appointment-schedule address as the answer.
+ */
+function meetlib_resolve_short( $url ) {
+	$url = trim( (string) $url );
+	if ( ! meetlib_is_short_link( $url ) ) { return ''; }
+	for ( $hop = 0; $hop < 4; $hop++ ) {
+		$next = '';
+		foreach ( array( 'HEAD', 'GET' ) as $method ) {
+			$res = wp_remote_request( $url, array( 'method' => $method, 'timeout' => 6, 'redirection' => 0 ) );
+			if ( is_wp_error( $res ) ) { continue; }
+			$loc = wp_remote_retrieve_header( $res, 'location' );
+			if ( is_array( $loc ) ) { $loc = reset( $loc ); }
+			if ( is_string( $loc ) && '' !== $loc ) { $next = $loc; break; }
+		}
+		if ( '' === $next ) { return ''; }
+		$full = meetlib_schedule_url( $next );
+		if ( '' !== $full ) { return $full; }
+		if ( ! preg_match( '#^https://calendar\.(?:app\.google|google\.com)/#', $next ) ) { return ''; }
+		$url = $next;
+	}
+	return '';
+}
+
+/** Short links in the directory that have not been looked up yet (or failed over an hour ago). */
+function meetlib_links_pending() {
+	$links = meetlib_links();
+	$out   = array();
+	foreach ( meetlib_get() as $lib ) {
+		$b = isset( $lib['booking'] ) ? trim( (string) $lib['booking'] ) : '';
+		if ( ! meetlib_is_short_link( $b ) || ! empty( $links[ $b ]['url'] ) ) { continue; }
+		if ( isset( $links[ $b ]['t'] ) && (int) $links[ $b ]['t'] > time() - HOUR_IN_SECONDS ) { continue; }
+		$out[ $b ] = 1;
+	}
+	return array_keys( $out );
+}
+
+/** Look up every pending short link and forget links no longer in the directory. Returns how many were tried. */
+function meetlib_resolve_links() {
+	$todo = meetlib_links_pending();
+	$old  = meetlib_links();
+	$keep = array();
+	foreach ( meetlib_get() as $lib ) {
+		$b = isset( $lib['booking'] ) ? trim( (string) $lib['booking'] ) : '';
+		if ( isset( $old[ $b ] ) ) { $keep[ $b ] = $old[ $b ]; }
+	}
+	foreach ( $todo as $b ) {
+		$full = meetlib_resolve_short( $b );
+		if ( '' === $full ) { error_log( 'meet-a-librarian: could not look up the full link for ' . $b ); }
+		$keep[ $b ] = array( 'url' => $full, 't' => time() );
+	}
+	if ( $keep !== $old ) { update_option( MEETLIB_LINKS_OPTION, $keep ); }
+	return count( $todo );
+}
+
+/** After an upgrade, or after a failed lookup, do the lookups at the end of an ordinary page load. */
+add_action( 'shutdown', 'meetlib_maybe_resolve', 998 );
+function meetlib_maybe_resolve() {
+	if ( get_transient( 'meetlib_resolve_lock' ) || ! meetlib_links_pending() ) { return; }
+	set_transient( 'meetlib_resolve_lock', 1, 10 * MINUTE_IN_SECONDS );
+	if ( function_exists( 'fastcgi_finish_request' ) ) { fastcgi_finish_request(); }
+	ignore_user_abort( true );
+	meetlib_resolve_links();
 }
 
 /* ------------------------------------------------------------------ *
@@ -256,6 +357,13 @@ add_action( 'rest_api_init', function () {
 		'permission_callback' => '__return_true', // patrons are not logged in; hardened in the handler
 		'callback'            => 'meetlib_handle_request',
 	) );
+
+	// The "add these answers to that appointment" link in a librarian's email. The key in the link is the permission.
+	register_rest_route( 'meet-a-librarian/v1', '/attach', array(
+		'methods'             => array( 'GET', 'POST' ),
+		'permission_callback' => '__return_true',
+		'callback'            => 'meetlib_attach_route',
+	) );
 } );
 
 /**
@@ -277,6 +385,7 @@ function meetlib_save_roster( WP_REST_Request $req ) {
 	if ( isset( $body['pageUrl'] ) ) {
 		update_option( MEETLIB_PAGE_OPTION, esc_url_raw( trim( (string) $body['pageUrl'] ) ) );
 	}
+	meetlib_resolve_links(); // so a newly pasted short link shows its calendar straight away
 	return rest_ensure_response( array( 'ok' => true ) );
 }
 
@@ -585,7 +694,17 @@ function meetlib_notify( $post_id ) {
 			$outro[] = 'The same patron sent another request that was matched to their appointment on ' . $twin . '. This one may be a duplicate of it or an update to it.';
 		}
 		$hints = get_post_meta( $post_id, '_meetlib_hints', true );
-		if ( is_array( $hints ) && $hints ) {
+		$evs   = get_post_meta( $post_id, '_meetlib_hint_events', true );
+		if ( is_array( $evs ) && $evs ) {
+			$outro[] = '';
+			$outro[] = 'Booked on your calendar shortly after this form was sent, under a different address (possibly this patron):';
+			foreach ( array_values( $evs ) as $i => $h ) {
+				$outro[] = '';
+				$outro[] = '  - ' . trim( $h['when'] . ' (booked as ' . $h['as'] . ')' );
+				$outro[] = '    If that is this patron, add these answers to that appointment:';
+				$outro[] = '    ' . meetlib_attach_url( $post_id, $i );
+			}
+		} elseif ( is_array( $hints ) && $hints ) {
 			$outro[] = '';
 			$outro[] = 'Booked on your calendar shortly after this form was sent, under a different address (possibly this patron):';
 			foreach ( $hints as $h ) { $outro[] = '  - ' . $h; }
@@ -884,10 +1003,13 @@ function meetlib_gcal_list_since( $calendar_id, $since ) {
  * answers into someone else's event, where its guests can read them. Hence no fuzzy matching.
  *
  * $hints collects up to 3 bookings made within 45 minutes of the form under a different address
- * (a patron signed in to a personal Google account). They are only ever shown to the librarian.
+ * (a patron signed in to a personal Google account). They are only ever shown to the librarian,
+ * who can attach the answers to one with the link in the email (meetlib_attach_handle);
+ * $hint_events carries the same bookings as { id, when, as } for that.
  */
-function meetlib_gcal_pick( $items, $email, $earliest, &$hints = array(), $calendar_tz = '' ) {
-	$hints   = array();
+function meetlib_gcal_pick( $items, $email, $earliest, &$hints = array(), $calendar_tz = '', &$hint_events = array() ) {
+	$hints       = array();
+	$hint_events = array();
 	$best    = null;
 	$best_ts = 0;
 	foreach ( (array) $items as $ev ) {
@@ -908,7 +1030,9 @@ function meetlib_gcal_pick( $items, $email, $earliest, &$hints = array(), $calen
 		if ( $match ) {
 			if ( null === $best || $ts < $best_ts ) { $best = $ev; $best_ts = $ts; }
 		} elseif ( '' !== $other && $ts <= $earliest + 45 * MINUTE_IN_SECONDS && count( $hints ) < 3 ) {
-			$hints[] = trim( meetlib_gcal_when( isset( $ev['start'] ) ? $ev['start'] : array(), $calendar_tz ) . ' (booked as ' . $other . ')' );
+			$when          = meetlib_gcal_when( isset( $ev['start'] ) ? $ev['start'] : array(), $calendar_tz );
+			$hints[]       = trim( $when . ' (booked as ' . $other . ')' );
+			$hint_events[] = array( 'id' => (string) $ev['id'], 'when' => $when, 'as' => $other );
 		}
 	}
 	return $best;
@@ -921,7 +1045,7 @@ function meetlib_gcal_pick( $items, $email, $earliest, &$hints = array(), $calen
  * $since is when the form was sent (Unix time on this server).
  */
 function meetlib_gcal_tag( $calendar_id, $data, $attachment, $since ) {
-	$out = array( 'status' => 'off', 'when' => '', 'link' => '', 'hints' => array() );
+	$out = array( 'status' => 'off', 'when' => '', 'link' => '', 'hints' => array(), 'hint_events' => array() );
 	if ( ! meetlib_gcal_enabled() ) { return $out; }
 	if ( '' === (string) $calendar_id ) { $out['status'] = 'no_calendar'; return $out; }
 
@@ -945,8 +1069,10 @@ function meetlib_gcal_tag( $calendar_id, $data, $attachment, $since ) {
 	$earliest = (int) $since - $skew;
 
 	$hints = array();
-	$best  = meetlib_gcal_pick( $list['items'], $data['email'], $earliest, $hints, $list['timeZone'] );
-	$out['hints'] = $hints;
+	$evs   = array();
+	$best  = meetlib_gcal_pick( $list['items'], $data['email'], $earliest, $hints, $list['timeZone'], $evs );
+	$out['hints']       = $hints;
+	$out['hint_events'] = $evs;
 	if ( ! $best ) { $out['status'] = 'not_found'; return $out; }
 
 	// If-Match: if anything else changed the event since we read it, Google refuses and we look again later.
@@ -1062,9 +1188,206 @@ function meetlib_gcal_retry( $post_id, $force = false ) {
 	update_post_meta( $post_id, '_meetlib_when', $r['when'] );
 	update_post_meta( $post_id, '_meetlib_event_link', $r['link'] );
 	update_post_meta( $post_id, '_meetlib_hints', $r['hints'] );
+	update_post_meta( $post_id, '_meetlib_hint_events', $r['hint_events'] );
 	delete_post_meta( $post_id, '_meetlib_gcal_next' );
 	meetlib_unlock( $post_id );
 	meetlib_notify( $post_id );
+}
+
+/* ------------------------------------------------------------------ *
+ *  "Add these answers to that appointment" (the link in a "no booking found" email)
+ *
+ *  A patron who books under a different address is never matched automatically. The librarian's
+ *  email lists such bookings, each with a link here. Opening the link only shows what would
+ *  happen (mail scanners open links); the answers are written when the librarian presses the
+ *  button. The random key in the link is the permission: librarians need not be WordPress users.
+ * ------------------------------------------------------------------ */
+
+function meetlib_attach_key( $post_id ) {
+	$k = (string) get_post_meta( $post_id, '_meetlib_attach_key', true );
+	if ( '' === $k ) {
+		$k = wp_generate_password( 32, false );
+		update_post_meta( $post_id, '_meetlib_attach_key', $k );
+	}
+	return $k;
+}
+
+function meetlib_attach_url( $post_id, $index ) {
+	return add_query_arg(
+		array( 'r' => (int) $post_id, 'b' => (int) $index, 'k' => meetlib_attach_key( $post_id ) ),
+		rest_url( 'meet-a-librarian/v1/attach' )
+	);
+}
+
+/**
+ * Show ($do = false) or carry out ($do = true) attaching request $post_id's answers to its
+ * $index-th possible booking. Returns { state, msg, email, help, when, as, link }; state is
+ * ask | done | already | invalid | failed. Nothing is written unless every check passes: the
+ * booking still exists, is not cancelled, still lists the address named in the email, and has no
+ * form answers on it yet.
+ */
+function meetlib_attach_handle( $post_id, $index, $key, $do ) {
+	$post_id = (int) $post_id;
+	$out     = array( 'state' => 'invalid', 'msg' => 'Open the link from the original "no booking found" email. If that is what you did, the request may have been deleted from the website.', 'email' => '', 'help' => '', 'when' => '', 'as' => '', 'link' => '' );
+	if ( MEETLIB_CPT !== get_post_type( $post_id ) || 'publish' !== get_post_status( $post_id ) ) { return $out; }
+	$have = (string) get_post_meta( $post_id, '_meetlib_attach_key', true );
+	if ( '' === $have || ! hash_equals( $have, (string) $key ) ) { return $out; }
+
+	$data = array();
+	foreach ( array( 'email', 'help', 'course', 'due', 'meeting' ) as $k ) {
+		$data[ $k ] = (string) get_post_meta( $post_id, '_meetlib_' . $k, true );
+	}
+	$status = (string) get_post_meta( $post_id, '_meetlib_gcal', true );
+	$evs    = get_post_meta( $post_id, '_meetlib_hint_events', true );
+	$evs    = is_array( $evs ) ? array_values( $evs ) : array();
+	if ( 'added' === $status ) {
+		$out['state'] = 'already';
+		$out['email'] = $data['email'];
+		$out['help']  = $data['help'];
+		$out['when']  = (string) get_post_meta( $post_id, '_meetlib_when', true );
+		$out['link']  = (string) get_post_meta( $post_id, '_meetlib_event_link', true );
+		$out['msg']   = 'These answers are already on an appointment, so nothing was changed.';
+		return $out;
+	}
+	if ( 'not_found' !== $status || ! isset( $evs[ (int) $index ]['id'] ) ) { return $out; }
+	$hint         = $evs[ (int) $index ];
+	$out['email'] = $data['email'];
+	$out['help']  = $data['help'];
+	$out['when']  = (string) $hint['when'];
+	$out['as']    = (string) $hint['as'];
+	$out['msg']   = '';
+	if ( ! $do ) { $out['state'] = 'ask'; return $out; }
+
+	$out['state'] = 'failed';
+	if ( ! meetlib_lock( $post_id ) ) { $out['msg'] = 'The website is working on this request right now. Try again in a minute.'; return $out; }
+	$calendar = (string) get_post_meta( $post_id, '_meetlib_calendar', true );
+	$path     = meetlib_gcal_events_path( $calendar ) . '/' . rawurlencode( (string) $hint['id'] );
+	$gone     = 'That booking is no longer on the calendar (it may have been cancelled or moved), so nothing was added.';
+	$ev       = meetlib_gcal_api( 'GET', $path );
+	if ( is_wp_error( $ev ) ) {
+		$d    = $ev->get_error_data();
+		$code = ( is_array( $d ) && isset( $d['status'] ) ) ? (int) $d['status'] : 0;
+		error_log( 'meet-a-librarian: attach lookup failed for request ' . $post_id . ': ' . $ev->get_error_message() );
+		$out['msg'] = in_array( $code, array( 404, 410 ), true ) ? $gone : 'The website could not reach your Google Calendar, so nothing was added. Try again in a few minutes.';
+		meetlib_unlock( $post_id );
+		return $out;
+	}
+	$guest = false;
+	foreach ( ( isset( $ev['attendees'] ) && is_array( $ev['attendees'] ) ) ? $ev['attendees'] : array() as $a ) {
+		if ( ! empty( $a['email'] ) && 0 === strcasecmp( (string) $a['email'], (string) $hint['as'] ) ) { $guest = true; }
+	}
+	$desc = isset( $ev['description'] ) ? trim( (string) $ev['description'] ) : '';
+	if ( empty( $ev['id'] ) || ( isset( $ev['status'] ) && 'cancelled' === $ev['status'] ) ) {
+		$out['msg'] = $gone;
+	} elseif ( false !== strpos( $desc, MEETLIB_GCAL_MARKER ) ) {
+		$out['msg'] = 'That booking already has a patron\'s form answers on it, so nothing was added.';
+	} elseif ( ! $guest ) {
+		$out['msg'] = 'That booking has changed since the email was sent (' . $hint['as'] . ' is no longer on it), so nothing was added.';
+	}
+	if ( '' !== $out['msg'] ) { meetlib_unlock( $post_id ); return $out; }
+
+	$name  = (string) get_post_meta( $post_id, '_meetlib_file_name', true );
+	$note  = '' !== $name ? $name . ' (sent to you by email)' : (string) get_post_meta( $post_id, '_meetlib_attach_url', true );
+	$patch = meetlib_gcal_api(
+		'PATCH',
+		$path,
+		array( 'sendUpdates' => 'none' ),
+		array( 'description' => ( '' !== $desc ? $desc . '<br><br>' : '' ) . meetlib_gcal_details_html( $data, $note ) ),
+		! empty( $ev['etag'] ) ? array( 'If-Match' => (string) $ev['etag'] ) : array()
+	);
+	if ( is_wp_error( $patch ) ) {
+		error_log( 'meet-a-librarian: attach update failed for request ' . $post_id . ': ' . $patch->get_error_message() );
+		$out['msg'] = 'Google Calendar did not accept the change, so nothing was added. Try again in a few minutes.';
+		meetlib_unlock( $post_id );
+		return $out;
+	}
+	$out['link'] = ! empty( $ev['htmlLink'] ) ? esc_url_raw( (string) $ev['htmlLink'] ) : '';
+	update_post_meta( $post_id, '_meetlib_gcal', 'added' );
+	update_post_meta( $post_id, '_meetlib_when', $out['when'] );
+	update_post_meta( $post_id, '_meetlib_event_link', $out['link'] );
+	update_post_meta( $post_id, '_meetlib_confirmed', time() );
+	update_post_meta( $post_id, '_meetlib_confirmed_as', $out['as'] );
+	meetlib_unlock( $post_id );
+	$out['state'] = 'done';
+	return $out;
+}
+
+/** REST callback for the link: a small standalone page, not JSON. */
+function meetlib_attach_route( WP_REST_Request $req ) {
+	$id  = (int) $req->get_param( 'r' );
+	$idx = (int) $req->get_param( 'b' );
+	$key = (string) $req->get_param( 'k' );
+	$do  = 'POST' === $req->get_method() && '1' === (string) $req->get_param( 'go' );
+	$r   = meetlib_attach_handle( $id, $idx, $key, $do );
+	nocache_headers();
+	header( 'Content-Type: text/html; charset=utf-8' );
+	header( 'X-Robots-Tag: noindex, nofollow' );
+	header( 'Referrer-Policy: no-referrer' );
+	echo meetlib_attach_page( $r, 'ask' === $r['state'] ? meetlib_attach_url( $id, $idx ) : '' ); // phpcs:ignore WordPress.Security.EscapeOutput
+	exit;
+}
+
+/** The page for meetlib_attach_handle()'s result. $action is where the confirm button posts. */
+function meetlib_attach_page( $r, $action ) {
+	$titles = array(
+		'ask'     => 'Add these answers to this appointment?',
+		'done'    => 'Answers added to the appointment',
+		'already' => 'Already on an appointment',
+		'invalid' => 'This link can\'t be used',
+		'failed'  => 'Nothing was added',
+	);
+	$title = isset( $titles[ $r['state'] ] ) ? $titles[ $r['state'] ] : $titles['invalid'];
+	$help  = (string) $r['help'];
+	if ( function_exists( 'mb_strlen' ) && mb_strlen( $help ) > 280 ) { $help = mb_substr( $help, 0, 280 ) . '…'; }
+	$h = '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+		. '<meta name="robots" content="noindex,nofollow"><title>' . esc_html( $title ) . ' | Meet With a Librarian</title><style>' . meetlib_attach_css() . '</style></head><body><main>'
+		. '<p class="site">Meet With a Librarian</p><h1 class="' . esc_attr( $r['state'] ) . '">' . esc_html( $title ) . '</h1>';
+	if ( '' !== (string) $r['msg'] ) { $h .= '<p class="msg">' . esc_html( $r['msg'] ) . '</p>'; }
+	if ( 'invalid' !== $r['state'] ) {
+		$h .= '<section><h2>The form answers</h2><dl><dt>From</dt><dd>' . esc_html( $r['email'] ) . '</dd><dt>Asked</dt><dd>' . nl2br( esc_html( $help ), false ) . '</dd></dl></section>';
+		if ( '' !== (string) $r['when'] ) {
+			$h .= '<p class="onto">' . ( 'ask' === $r['state'] ? 'will be added to' : ( 'failed' === $r['state'] ? 'were not added to' : 'are on' ) ) . '</p>'
+				. '<section><h2>The appointment</h2><dl><dt>When</dt><dd>' . esc_html( $r['when'] ) . '</dd>'
+				. ( '' !== (string) $r['as'] ? '<dt>Booked as</dt><dd>' . esc_html( $r['as'] ) . '</dd>' : '' ) . '</dl></section>';
+		}
+	}
+	if ( 'ask' === $r['state'] ) {
+		$h .= '<form method="post" action="' . esc_url( $action ) . '"><input type="hidden" name="go" value="1">'
+			. '<button type="submit">Add the answers to this appointment</button></form>'
+			. '<p class="fine">The answers go into the appointment\'s description, where its guests can read them. Guests are not notified. If this is a different person\'s booking, close this page and nothing changes.</p>';
+	} elseif ( '' !== (string) $r['link'] ) {
+		$h .= '<p class="next"><a href="' . esc_url( $r['link'] ) . '">Open the appointment in Google Calendar</a></p>';
+	}
+	return $h . '</main></body></html>';
+}
+
+function meetlib_attach_css() {
+	return <<<'CSS'
+:root{color-scheme:light dark;--paper:#f3f5f8;--card:#fff;--ink:#16202b;--muted:#556270;--line:#cfd6de;--accent:#00539b;--on:#fff;--ok:#1a6b3c;--bad:#a3261b}
+@media (prefers-color-scheme:dark){:root{--paper:#10161d;--card:#18212b;--ink:#e8edf2;--muted:#9aa7b4;--line:#303c49;--accent:#2b78bf;--on:#fff;--ok:#7fd1a0;--bad:#ff9a8f}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:1rem/1.55 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+main{max-width:34rem;margin:0 auto;padding:2.5rem 1.25rem 4rem}
+.site{margin:0 0 1.5rem;color:var(--muted);font-size:.9rem}
+h1{margin:0 0 1rem;font:400 1.9rem/1.2 Georgia,"Iowan Old Style","Times New Roman",serif}
+h1.done{color:var(--ok)}
+h1.failed,h1.invalid{color:var(--bad)}
+.msg{margin:0 0 1.5rem;font-size:1.05rem}
+section{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:1rem 1.15rem}
+h2{margin:0 0 .6rem;font-size:.9rem;font-weight:600;color:var(--muted)}
+dl{margin:0;display:grid;grid-template-columns:6.5rem minmax(0,1fr);gap:.35rem .75rem}
+dt{color:var(--muted)}
+dd{margin:0;overflow-wrap:anywhere}
+.onto{margin:0 0 0 1.15rem;padding:.55rem 0 .55rem 1rem;border-left:2px solid var(--line);color:var(--muted);font-size:.9rem}
+form{margin:1.5rem 0 0}
+button{font:inherit;font-weight:600;color:var(--on);background:var(--accent);border:0;border-radius:6px;padding:.85rem 1.25rem;cursor:pointer}
+button:hover{filter:brightness(1.1)}
+button:focus-visible,a:focus-visible{outline:3px solid var(--ink);outline-offset:3px}
+.fine{margin:1rem 0 0;color:var(--muted);font-size:.9rem}
+.next{margin:1.5rem 0 0}
+.next a{color:var(--ink);font-weight:600}
+@media (max-width:26rem){dl{grid-template-columns:1fr;gap:0}dd{margin-bottom:.5rem}}
+CSS;
 }
 
 /**
@@ -1185,6 +1508,13 @@ function meetlib_health() {
 		) );
 		if ( $late > 0 ) {
 			$out[] = $late . ' appointment request(s) are overdue for a calendar check, so their emails to the librarian are being held. Background tasks may not be running on this site. Open Calendar Integration and click "Run waiting checks now".';
+		}
+	}
+	$links = meetlib_links();
+	foreach ( meetlib_get() as $lib ) {
+		$b = isset( $lib['booking'] ) ? trim( (string) $lib['booking'] ) : '';
+		if ( meetlib_is_short_link( $b ) && isset( $links[ $b ] ) && empty( $links[ $b ]['url'] ) ) {
+			$out[] = 'The website could not look up the full Google link behind ' . $lib['name'] . '\'s short booking link, so patrons get a button that opens Google in a new tab instead of a calendar on the page. It will try again within the hour. To fix it now, open the short link in a browser, copy the address it lands on, and paste that as the booking link.';
 		}
 	}
 	$failed = meetlib_count( array(
@@ -1524,7 +1854,7 @@ var FIELDS=[
   {k:"photo",label:"Photo URL",full:true},
   {k:"profile",label:"Profile URL",full:true}
 ];
-var libs=[], saved=[], pageUrl="", savedPage="";
+var libs=[], saved=[], pageUrl="", savedPage="", embeds={};
 function el(t,c){var e=document.createElement(t);if(c)e.className=c;return e;}
 function clone(o){return JSON.parse(JSON.stringify(o));}
 function esc(x){return String(x==null?"":x).replace(/[&<>"']/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});}
@@ -1537,11 +1867,17 @@ function widgetCode(name){
     +'font-size:15px;font-weight:600;line-height:1.3;color:#ffffff;background:#00539b;text-decoration:none;padding:10px 18px;border-radius:8px;">'
     +'📅 Book an appointment with '+esc(firstName(name))+'</a>';
 }
-/* Mirrors meetlib_embed_url() in PHP: only these links can show the calendar inside the page. */
+/* Mirrors meetlib_embed_url() in PHP: only these links can show the calendar inside the page.
+   embeds = booking link -> embed address as the server last reported it (short links are looked up there). */
+function noteEmbeds(d){embeds={};d.forEach(function(l){if(l&&l.booking)embeds[String(l.booking).trim()]=l.embed||"";});}
 function bookingNote(v){
   v=String(v==null?"":v).trim();
   if(!v)return "";
   if(/calendar\.google\.com\/calendar\/(u\/\d+\/)?appointments/i.test(v))return "✓ Google appointment link: the calendar will appear on the booking page.";
+  if(/^https:\/\/calendar\.app\.google\/[A-Za-z0-9_-]+\/?$/.test(v)){
+    if(embeds[v])return "✓ Short Google appointment link: the website found the full link, so the calendar will appear on the booking page.";
+    return "Short Google link: when you save, the website looks up the full link so the calendar can appear on the booking page. If this note has not changed to a ✓ after saving, reload this page in a few minutes.";
+  }
   return "This is not a full Google appointment link (those start with https://calendar.google.com/calendar/appointments/), so patrons will get a button that opens it in a new tab instead of a calendar on the page.";
 }
 function isLive(name){var sl=slug(name);if(!sl)return false;return saved.some(function(s){return slug(s.name)===sl;});}
@@ -1609,6 +1945,11 @@ saveBtn.onclick=function(){
       if(!res.ok){flash(res.j&&res.j.message?res.j.message:"Save failed. Your changes are still on this screen; reload the page in another tab to sign in again, then click Save here.",true);return;}
       libs=libs.filter(function(l){return String(l.name||"").trim();});
       saved=clone(libs);savedPage=pageUrl;render();flash("Saved — it's live on the website. ✓");
+      /* Short links are looked up during the save; fetch the result so each note is current. */
+      fetch(MEETLIB.root,{credentials:"same-origin",cache:"no-store"}).then(function(r){return r.ok?r.json():null;}).then(function(d){
+        if(!Array.isArray(d))return;noteEmbeds(d);
+        libs.forEach(function(l,i){var n=document.getElementById("meetlib-"+i+"-booking-note");if(n)n.textContent=bookingNote(l.booking);});
+      }).catch(function(){});
     })
     .catch(function(){saveBtn.disabled=false;flash("Save failed: the website could not be reached. Your changes are still on this screen; try again.",true);});
 };
@@ -1618,7 +1959,7 @@ pageUrl=savedPage=(MEETLIB.pageUrl||"");
 pageInput.value=pageUrl;
 fetch(MEETLIB.root,{credentials:"same-origin",cache:"no-store"})
   .then(function(r){if(!r.ok)throw 0;return r.json();})
-  .then(function(d){if(!Array.isArray(d))throw 0;libs=d.map(function(l){var o={};FIELDS.forEach(function(f){o[f.k]=l[f.k]||"";});return o;});saved=clone(libs);loaded=true;render();})
+  .then(function(d){if(!Array.isArray(d))throw 0;noteEmbeds(d);libs=d.map(function(l){var o={};FIELDS.forEach(function(f){o[f.k]=l[f.k]||"";});return o;});saved=clone(libs);loaded=true;render();})
   .catch(function(){
     saveBtn.disabled=true;document.getElementById("meetlib-add").disabled=true;
     document.getElementById("meetlib-rows").innerHTML="";
@@ -1710,6 +2051,9 @@ add_action( 'edit_form_after_title', function ( $post ) {
 		echo '<tr><th>Attachment</th><td>' . esc_html( $name ) . ' ' . ( $held ? '(held until the librarian\'s email is sent, then deleted)' : '(emailed to the librarian; not kept on the website)' ) . '</td></tr>';
 	}
 	$gcal = meetlib_gcal_status_label( get_post_meta( $post->ID, '_meetlib_gcal', true ) );
+	if ( get_post_meta( $post->ID, '_meetlib_confirmed', true ) ) {
+		$gcal = 'No booking was found under the patron\'s address. The librarian then added the answers to a booking made as ' . get_post_meta( $post->ID, '_meetlib_confirmed_as', true ) . ', using the link in the email.';
+	}
 	if ( '' !== $gcal ) {
 		echo '<tr><th>Calendar</th><td>' . esc_html( $gcal ) . '</td></tr>';
 	}

@@ -27,7 +27,10 @@
     } else {
       await until(function () { return $$("#meetlib-rows .card").length === 3; }, "three librarian cards");
       ok(/calendar will appear/.test($("#meetlib-0-booking-note").textContent), "Google appointment link is recognised");
-      ok(/not a full Google appointment link/.test($("#meetlib-1-booking-note").textContent), "short link gets a warning");
+      ok(/^Short Google link: when you save/.test($("#meetlib-1-booking-note").textContent), "short link not yet looked up says so");
+      type($("#meetlib-1-booking"), "https://example.com/book");
+      ok(/not a full Google appointment link/.test($("#meetlib-1-booking-note").textContent), "other link gets a warning");
+      type($("#meetlib-1-booking"), "https://calendar.app.google/known");
       ok($("#meetlib-2-booking-note").textContent === "", "empty link has no note");
 
       // Typing keeps focus and updates the note.
@@ -42,6 +45,7 @@
       ok(posts.length === 1 && posts[0].librarians.length === 3, "all three librarians sent");
       ok(posts[0].librarians[0].embed === undefined, "computed fields are not sent back");
       ok(posts[0].librarians[2].booking.indexOf("ZZZ") > 0, "edited link sent");
+      await until(function () { return /^✓ Short Google appointment link/.test($("#meetlib-1-booking-note").textContent); }, "short link confirmed after saving");
 
       // Removing everyone must not save an empty directory.
       $$("#meetlib-rows .tiny").forEach(function () { $("#meetlib-rows .tiny").click(); });

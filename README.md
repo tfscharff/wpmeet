@@ -12,6 +12,8 @@ Appointments.
 - Optional Google Calendar integration adds the patron's answers to the booked event and holds
   the librarian's email until the booking actually appears, so nobody is emailed about a
   request that never became an appointment
+- Short Google booking links (`calendar.app.google/...`) work as pasted: the site looks up the
+  full link behind each one so the calendar still appears on the page
 - A patron's attachment is emailed to the librarian and is not kept on the website
 - Deep-linkable per-librarian widget for embedding elsewhere
 - No custom database tables — the roster lives in a WordPress option, requests in a private post type
@@ -49,6 +51,10 @@ librarian is emailed the answers labelled "no booking found", along with any boo
 around the same time under a different address.
 
 - Patrons must book with the same email address they typed in the form. The page reminds them.
+- A booking made under a different address is never matched automatically. The "no booking found"
+  email lists such bookings with a link for each. The librarian opens the link, checks the
+  details, and presses **Add the answers to this appointment**. Opening the link changes nothing
+  by itself, and librarians do not need a WordPress account to use it.
 - To test, use a college address that is not the librarian's own. A librarian's own address is
   on every event they own, so it is recognised as a test and emailed without a calendar match.
 
@@ -61,6 +67,9 @@ used, when requests are overdue for a calendar check, or when an email could not
   found, and whether the librarian was emailed.
 - **Calendar Integration → Run waiting checks now** checks every waiting request immediately.
   Use it if the site's background tasks are not running.
+- A librarian's calendar shows on the page only for a Google appointment link. Under each booking
+  link the editor says whether the calendar will appear. If the site could not look up a short
+  link, a warning says so and patrons get a button that opens Google in a new tab until it can.
 - **Meet With a Librarian → Earlier versions** restores the directory as it was before any of
   the last five saves.
 
@@ -76,7 +85,8 @@ php -S 127.0.0.1:8123 tests/ui.php
 ```
 
 The last command serves a local preview of the patron page at `http://127.0.0.1:8123/` and of
-the directory editor at `/editor`; add `?autotest=1` to run the scripted checks.
+the directory editor at `/editor`; add `?autotest=1` to run the scripted checks. `/attach?state=ask`
+(or `done`, `already`, `failed`, `invalid`) previews the page behind the email link.
 
 ## License
 

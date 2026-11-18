@@ -33,16 +33,34 @@ update_option( 'meetlib_librarians', array(
 	array( 'name' => 'Jenny Castel', 'pronouns' => '', 'title' => 'Technology Librarian', 'liaison' => '', 'email' => '', 'photo' => '', 'profile' => '', 'booking' => '' ),
 ) );
 
+$GLOBALS['T']['g']['redirects']['https://calendar.app.google/known'] = 'https://calendar.google.com/appointments/schedules/KNOWN';
+
 $path = (string) parse_url( $_SERVER['REQUEST_URI'], PHP_URL_PATH );
+$saved_file = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'meetlib-ui-roster.json';
+if ( ( '/' === $path || '/editor' === $path ) && is_file( $saved_file ) ) { unlink( $saved_file ); } // opening a page starts over
+
+// The page a librarian reaches from the email link: /attach?state=ask|done|already|invalid|failed
+if ( '/attach' === $path ) {
+	$state = isset( $_GET['state'] ) ? (string) $_GET['state'] : 'ask';
+	$r     = array( 'state' => $state, 'msg' => '', 'email' => 'brangan_cavan@wheatoncollege.edu', 'help' => "I'm looking for a PDF of two books for Environmental History and can't find them.\nAlso, where is your office?", 'when' => 'Tuesday, November 17 at 12:30 pm', 'as' => 'cavbran1@gmail.com', 'link' => 'ask' === $state || 'failed' === $state ? '' : 'https://calendar.google.com/' );
+	if ( 'failed' === $state ) { $r['msg'] = 'That booking is no longer on the calendar (it may have been cancelled or moved), so nothing was added.'; }
+	if ( 'already' === $state ) { $r['msg'] = 'These answers are already on an appointment, so nothing was changed.'; $r['as'] = ''; }
+	if ( 'invalid' === $state ) { $r = array_merge( $r, array( 'msg' => 'Open the link from the original "no booking found" email. If that is what you did, the request may have been deleted from the website.', 'email' => '', 'help' => '', 'when' => '', 'as' => '', 'link' => '' ) ); }
+	echo meetlib_attach_page( $r, '/attach?state=done' );
+	return true;
+}
 
 if ( '/wp-json/meet-a-librarian/v1/librarians' === $path && 'POST' === $_SERVER['REQUEST_METHOD'] ) {
 	header( 'Content-Type: application/json' );
 	$r = meetlib_save_roster( new WP_REST_Request( (array) json_decode( file_get_contents( 'php://input' ), true ) ) );
+	if ( ! is_wp_error( $r ) ) { file_put_contents( $saved_file, json_encode( get_option( 'meetlib_librarians' ) ) ); } // each request starts fresh; remember the save
 	if ( is_wp_error( $r ) ) { http_response_code( 400 ); echo json_encode( array( 'message' => $r->get_error_message() ) ); } else { echo json_encode( $r ); }
 	return true;
 }
 if ( '/wp-json/meet-a-librarian/v1/librarians' === $path ) {
 	if ( isset( $_GET['broken'] ) ) { http_response_code( 500 ); echo 'server error'; return true; }
+	$was = is_file( $saved_file ) ? json_decode( (string) file_get_contents( $saved_file ), true ) : null;
+	if ( is_array( $was ) && $was ) { update_option( 'meetlib_librarians', $was ); meetlib_resolve_links(); }
 	$rows = meetlib_public_roster();
 	foreach ( $rows as &$r ) { if ( '' !== $r['embed'] ) { $r['embed'] = '/fake-calendar'; } }
 	header( 'Content-Type: application/json' );
