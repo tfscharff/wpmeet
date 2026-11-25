@@ -732,5 +732,28 @@ eq( $bk[0]['by'], 'tester', '49 records who saved' );
 meetlib_save_roster( new WP_REST_Request( array( 'librarians' => array( array( 'name' => 'P7' ) ) ) ) );
 eq( get_option( 'meetlib_librarians_backup' ), $bk, '49 saving an unchanged roster adds no version' );
 
+// 50. The default roster is empty, and every consumer copes with no librarians.
+t_reset();
+delete_option( 'meetlib_librarians' ); // t_reset() seeds example librarians; a fresh site has none saved
+eq( meetlib_default(), array(), '50 the built-in default roster is empty' );
+eq( get_option( 'meetlib_librarians' ), false, '50 a fresh site has no saved roster' );
+eq( meetlib_get(), array(), '50 no saved roster gives an empty roster' );
+eq( meetlib_public_roster(), array(), '50 GET /librarians serves an empty list' );
+eq( meetlib_links_pending(), array(), '50 no short links pending' );
+eq( meetlib_resolve_links(), 0, '50 resolving links with no roster does nothing' );
+eq( meetlib_health(), array(), '50 no health warnings with no roster' );
+$r = meetlib_handle_request( new WP_REST_Request( array( 'librarian' => 0, 'librarianSlug' => 'someone', 'email' => 'student@wheatoncollege.edu', 'help' => 'x' ) ) );
+ok( is_wp_error( $r ) && 'meetlib_unavailable' === $r->get_error_code(), '50 a request to a librarian who is not listed is refused cleanly' );
+$page = meetlib_shortcode( array() );
+has( $page, 'id="meetlib-librarians"', '50 the shortcode still renders its mount point with no roster' );
+$ed = meetlib_editor_markup();
+has( $ed, 'No librarians yet', '50 the editor has an empty-state message' );
+has( $page . meetlib_widget_script(), 'No librarians are listed yet.', '50 the patron page has an empty-state message' );
+// A roster a site has already saved is untouched by the new default.
+update_option( 'meetlib_librarians', array( array( 'name' => 'Kept Person', 'booking' => '' ) ) );
+eq( meetlib_get()[0]['name'], 'Kept Person', '50 an already-saved roster still wins' );
+update_option( 'meetlib_librarians', 'junk' );
+eq( meetlib_get(), array(), '50 a corrupt saved value falls back to the empty default' );
+
 echo $GLOBALS['fails'] ? "\n{$GLOBALS['fails']} FAILED, {$GLOBALS['passes']} passed\n" : "All {$GLOBALS['passes']} checks passed\n";
 exit( $GLOBALS['fails'] ? 1 : 0 );

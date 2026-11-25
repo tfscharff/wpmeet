@@ -24,6 +24,15 @@
       $("#meetlib-save").click();
       await sleep(200);
       ok(posts.length === 0, "nothing is saved when the list did not load");
+    } else if (/empty=1/.test(location.search)) {
+      await until(function () { return /No librarians yet/.test($("#meetlib-rows").textContent); }, "empty-state message");
+      ok($$("#meetlib-rows .card").length === 0, "no librarian cards on a fresh site");
+      ok(!$("#meetlib-add").disabled, "Add is enabled on an empty directory");
+      $("#meetlib-save").click();
+      await sleep(200);
+      ok(posts.length === 0 && /Nothing was saved/.test(status()), "an empty directory cannot be saved");
+      $("#meetlib-add").click();
+      ok($$("#meetlib-rows .card").length === 1, "Add a librarian adds a card");
     } else {
       await until(function () { return $$("#meetlib-rows .card").length === 3; }, "three librarian cards");
       ok(/calendar will appear/.test($("#meetlib-0-booking-note").textContent), "Google appointment link is recognised");

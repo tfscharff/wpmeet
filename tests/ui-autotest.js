@@ -21,6 +21,15 @@
 
   try {
     sessionStorage.clear();
+    if (/empty=1/.test(location.search)) {
+      await until(function () { return /No librarians are listed yet/.test($("#meetlib-librarians").textContent); }, "empty-state message");
+      ok($$(".meetlib__card").length === 0 && $$(".meetlib__grid").length === 0, "no cards or empty grid with no librarians");
+      ok(!$(".meetlib__loading"), "loading text is gone");
+      var pre0 = document.createElement("pre"); pre0.id = "results";
+      pre0.textContent = JSON.stringify({ fails: fails, total: out.length, lines: out });
+      document.body.appendChild(pre0);
+      return;
+    }
     await until(function () { return $$(".meetlib__card").length === 3; }, "three librarian cards");
     var books = $$(".meetlib__book");
     ok(books.length === 2, "two librarians can be booked");
