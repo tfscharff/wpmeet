@@ -40,7 +40,7 @@ function has( $hay, $needle, $what ) { ok( false !== strpos( (string) $hay, $nee
 function lacks( $hay, $needle, $what ) { ok( false === strpos( (string) $hay, $needle ), $what . ' (should not contain "' . $needle . '")' ); }
 function form( $over = array() ) {
 	return new WP_REST_Request( array_merge( array(
-		'librarian' => '0', 'librarianSlug' => 'cary-gouldin', 'email' => 'student@wheatoncollege.edu',
+		'librarian' => '0', 'librarianSlug' => 'example-librarian-one', 'email' => 'student@wheatoncollege.edu',
 		'help' => 'Finding sources', 'course' => 'ENG 101', 'due' => 'Friday', 'meeting' => 'On Zoom',
 	), $over ) );
 }
@@ -56,7 +56,7 @@ function submit( $ago = 0, $over = array() ) {
 function st( $id ) { return get_post_meta( $id, '_meetlib_gcal', true ); }
 function mails() { return $GLOBALS['T']['mails']; }
 function last_mail() { $m = mails(); return $m ? $m[ count( $m ) - 1 ] : array( 'to' => '', 'subject' => '', 'body' => '', 'attach' => array() ); }
-const CAL = 'cary@wheatoncollege.edu';
+const CAL = 'librarian1@wheatoncollege.edu';
 const STU = 'student@wheatoncollege.edu';
 $now = time();
 
@@ -80,7 +80,7 @@ eq( count( mails() ), 1, '1 a second run sends nothing more' );
 
 // 2. Events that existed before the form are never touched, even with the patron on them.
 t_reset();
-t_event( CAL, 'staffmtg', $now - 9000, array( 'jenny@wheatoncollege.edu' ) );
+t_event( CAL, 'staffmtg', $now - 9000, array( 'librarian3@wheatoncollege.edu' ) );
 t_event( CAL, 'oldmtg', $now - 9000, STU );
 $GLOBALS['T']['g']['cals'][ CAL ]['events']['oldmtg']['updated'] = t_iso( $now - 100 ); // someone RSVPed just now
 $id = submit( 600 );
@@ -91,7 +91,7 @@ eq( t_desc( CAL, 'staffmtg' ), '', '2 staff meeting untouched' );
 
 // 3. A librarian testing with their own address: emailed at once, calendar never searched.
 t_reset();
-t_event( CAL, 'curriculum', $now - 100, array( 'jenny@wheatoncollege.edu' ) );
+t_event( CAL, 'curriculum', $now - 100, array( 'librarian3@wheatoncollege.edu' ) );
 $id = submit( 0, array( 'email' => CAL ) );
 eq( st( $id ), 'self', '3 own-address test is recognised' );
 eq( count( mails() ), 1, '3 own-address test is emailed immediately' );
@@ -279,10 +279,10 @@ eq( last_mail()['headers'], array( 'Reply-To: ' . STU ), '20 reply-to is the pat
 
 // 21. Librarian with no email on file: goes to the shared inbox, not nowhere.
 t_reset();
-$r = meetlib_handle_request( form( array( 'librarian' => '1', 'librarianSlug' => 'jodi-devine' ) ) );
+$r = meetlib_handle_request( form( array( 'librarian' => '1', 'librarianSlug' => 'example-librarian-two' ) ) );
 ok( ! is_wp_error( $r ), '21 accepted' );
 eq( last_mail()['to'], meetlib_urgent_email(), '21 sent to the shared inbox' );
-has( last_mail()['body'], 'No email address is on file for Jodi Devine', '21 says why' );
+has( last_mail()['body'], 'No email address is on file for Example Librarian Two', '21 says why' );
 
 // 22. What the handler refuses.
 t_reset();
@@ -301,9 +301,9 @@ eq( count( $GLOBALS['T']['posts'] ), 0, '22 nothing stored for refused submissio
 
 // 23. Roster edited while the page was open: the slug wins over a stale index.
 t_reset();
-$r = meetlib_handle_request( form( array( 'librarian' => '1', 'librarianSlug' => 'cary-gouldin' ) ) );
+$r = meetlib_handle_request( form( array( 'librarian' => '1', 'librarianSlug' => 'example-librarian-one' ) ) );
 $id = $GLOBALS['T']['next_id'] - 1;
-eq( get_post_meta( $id, '_meetlib_librarian', true ), 'Cary Gouldin', '23 routed by slug' );
+eq( get_post_meta( $id, '_meetlib_librarian', true ), 'Example Librarian One', '23 routed by slug' );
 
 // 24. The same answers sent twice are one request; different answers are two.
 t_reset();

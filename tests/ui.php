@@ -28,9 +28,9 @@ require dirname( __DIR__ ) . '/meet-a-librarian.php';
 
 t_reset();
 update_option( 'meetlib_librarians', array(
-	array( 'name' => 'Cary Gouldin', 'pronouns' => 'she/her', 'title' => 'Humanities Librarian', 'liaison' => 'Liaison to Humanities', 'email' => 'cary@wheatoncollege.edu', 'photo' => '', 'profile' => '', 'booking' => 'https://calendar.google.com/calendar/appointments/schedules/AAA' ),
-	array( 'name' => 'Jodi Devine', 'pronouns' => 'she/her', 'title' => 'Design Librarian', 'liaison' => '', 'email' => 'jodi@wheatoncollege.edu', 'photo' => '', 'profile' => '', 'booking' => 'https://calendar.app.google/short' ),
-	array( 'name' => 'Jenny Castel', 'pronouns' => '', 'title' => 'Technology Librarian', 'liaison' => '', 'email' => '', 'photo' => '', 'profile' => '', 'booking' => '' ),
+	array( 'name' => 'Example Librarian One', 'pronouns' => 'she/her', 'title' => 'Humanities Librarian', 'liaison' => 'Liaison to Humanities', 'email' => 'librarian1@wheatoncollege.edu', 'photo' => '', 'profile' => '', 'booking' => 'https://calendar.google.com/calendar/appointments/schedules/AAA' ),
+	array( 'name' => 'Example Librarian Two', 'pronouns' => 'she/her', 'title' => 'Design Librarian', 'liaison' => '', 'email' => 'librarian2@wheatoncollege.edu', 'photo' => '', 'profile' => '', 'booking' => 'https://calendar.app.google/short' ),
+	array( 'name' => 'Example Librarian Three', 'pronouns' => '', 'title' => 'Technology Librarian', 'liaison' => '', 'email' => '', 'photo' => '', 'profile' => '', 'booking' => '' ),
 ) );
 
 $GLOBALS['T']['g']['redirects']['https://calendar.app.google/known'] = 'https://calendar.google.com/appointments/schedules/KNOWN';
@@ -42,7 +42,7 @@ if ( ( '/' === $path || '/editor' === $path ) && is_file( $saved_file ) ) { unli
 // The page a librarian reaches from the email link: /attach?state=ask|done|already|invalid|failed
 if ( '/attach' === $path ) {
 	$state = isset( $_GET['state'] ) ? (string) $_GET['state'] : 'ask';
-	$r     = array( 'state' => $state, 'msg' => '', 'email' => 'brangan_cavan@wheatoncollege.edu', 'help' => "I'm looking for a PDF of two books for Environmental History and can't find them.\nAlso, where is your office?", 'when' => 'Tuesday, November 17 at 12:30 pm', 'as' => 'cavbran1@gmail.com', 'link' => 'ask' === $state || 'failed' === $state ? '' : 'https://calendar.google.com/' );
+	$r     = array( 'state' => $state, 'msg' => '', 'email' => 'student2@wheatoncollege.edu', 'help' => "I'm looking for a PDF of two books for Environmental History and can't find them.\nAlso, where is your office?", 'when' => 'Tuesday, November 17 at 12:30 pm', 'as' => 'student.other@gmail.com', 'link' => 'ask' === $state || 'failed' === $state ? '' : 'https://calendar.google.com/' );
 	if ( 'failed' === $state ) { $r['msg'] = 'That booking is no longer on the calendar (it may have been cancelled or moved), so nothing was added.'; }
 	if ( 'already' === $state ) { $r['msg'] = 'These answers are already on an appointment, so nothing was changed.'; $r['as'] = ''; }
 	if ( 'invalid' === $state ) { $r = array_merge( $r, array( 'msg' => 'Open the link from the original "no booking found" email. If that is what you did, the request may have been deleted from the website.', 'email' => '', 'help' => '', 'when' => '', 'as' => '', 'link' => '' ) ); }
