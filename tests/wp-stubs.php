@@ -8,7 +8,7 @@ function t_reset() {
 	$GLOBALS['T'] = array(
 		'options' => array(), 'transients' => array(), 'posts' => array(), 'meta' => array(), 'next_id' => 100,
 		'mails' => array(), 'mail_ok' => true, 'cron' => array(),
-		'g' => array( 'skew' => 0, 'fail' => 0, 'patch_fail' => 0, 'cals' => array(), 'calls' => array(), 'redirects' => array() ),
+		'g' => array( 'skew' => 0, 'fail' => 0, 'fail_reason' => 'backendError', 'token' => null, 'patch_fail' => 0, 'cals' => array(), 'calls' => array(), 'redirects' => array() ),
 	);
 	unset( $GLOBALS['meetlib_gcal_skew'] );
 	update_option( 'meetlib_gcal_key', json_encode( array( 'client_email' => 'svc@proj.iam.gserviceaccount.com', 'private_key' => 'x' ) ) );
@@ -40,7 +40,18 @@ class WP_Query {
 }
 
 function is_wp_error( $x ) { return $x instanceof WP_Error; }
-function add_action() {}
+/** Hooks and REST routes the plugin registers, kept so tests can run the anonymous callbacks (not cleared by t_reset). */
+$GLOBALS['T_hooks'] = array(); $GLOBALS['T_routes'] = array(); $GLOBALS['T_caps'] = array();
+function add_action( $hook = '', $cb = null ) { $GLOBALS['T_hooks'][ $hook ][] = $cb; }
+function t_hook( $hook, $n = 0 ) { return $GLOBALS['T_hooks'][ $hook ][ $n ]; }
+function register_rest_route( $ns, $route, $args ) {
+	foreach ( isset( $args['methods'] ) ? array( $args ) : $args as $a ) {
+		foreach ( (array) $a['methods'] as $m ) { $GLOBALS['T_routes'][ $m . ' ' . $ns . $route ] = $a; }
+	}
+}
+function current_user_can( $cap ) { return in_array( $cap, $GLOBALS['T_caps'], true ); }
+if ( ! function_exists( '__return_true' ) ) { function __return_true() { return true; } }
+function wp_die( $msg = '', $code = 0 ) { throw new Exception( 'wp_die: ' . $msg ); }
 function add_filter() {}
 function remove_filter() {}
 function add_shortcode() {}
@@ -109,8 +120,8 @@ function esc_attr( $s ) { return htmlspecialchars( (string) $s, ENT_QUOTES ); }
 function esc_url( $s ) { return (string) $s; }
 function esc_url_raw( $s ) { return (string) $s; }
 function sanitize_email( $s ) { return trim( (string) $s ); }
-function sanitize_text_field( $s ) { return trim( preg_replace( '/\s+/', ' ', strip_tags( (string) $s ) ) ); }
-function sanitize_textarea_field( $s ) { return trim( strip_tags( (string) $s ) ); }
+function sanitize_text_field( $s ) { return is_array( $s ) || is_object( $s ) ? '' : trim( preg_replace( '/\s+/', ' ', strip_tags( (string) $s ) ) ); } // WordPress returns '' for arrays and objects
+function sanitize_textarea_field( $s ) { return is_array( $s ) || is_object( $s ) ? '' : trim( strip_tags( (string) $s ) ); }
 function is_email( $s ) { return (bool) preg_match( '/^[^@\s]+@[^@\s]+\.[a-z]+$/i', (string) $s ); }
 function wp_date( $f, $ts, $tz = null ) { $d = new DateTime( '@' . $ts ); $d->setTimezone( $tz ? $tz : new DateTimeZone( 'UTC' ) ); return $d->format( $f ); }
 function human_time_diff( $a, $b ) { $m = (int) round( abs( $b - $a ) / 60 ); return $m >= 120 ? round( $m / 60 ) . ' hours' : $m . ' mins'; }
@@ -141,7 +152,13 @@ function t_desc( $cal, $id ) { return $GLOBALS['T']['g']['cals'][ $cal ]['events
 function t_reply( $code, $body ) {
 	return array( 'code' => $code, 'body' => json_encode( $body ), 'headers' => array( 'date' => gmdate( 'D, d M Y H:i:s', time() - $GLOBALS['T']['g']['skew'] ) . ' GMT' ) );
 }
-function wp_remote_post( $url, $args ) { return t_reply( 200, array( 'access_token' => 'tok', 'expires_in' => 3600 ) ); }
+/** Google's token endpoint. Set $GLOBALS['T']['g']['token'] = array( code, body ) to make it refuse. */
+function wp_remote_post( $url, $args ) {
+	$g = &$GLOBALS['T']['g'];
+	$g['calls'][] = 'POST ' . $url;
+	if ( $g['token'] ) { return t_reply( $g['token'][0], $g['token'][1] ); }
+	return t_reply( 200, array( 'access_token' => 'tok', 'expires_in' => 3600 ) );
+}
 function wp_remote_request( $url, $args ) {
 	$g = &$GLOBALS['T']['g'];
 	$g['calls'][] = $args['method'] . ' ' . $url;
@@ -150,7 +167,7 @@ function wp_remote_request( $url, $args ) {
 			? array( 'code' => 302, 'body' => '', 'headers' => array( 'location' => $g['redirects'][ $url ] ) )
 			: array( 'code' => 404, 'body' => '', 'headers' => array() );
 	}
-	if ( $g['fail'] ) { return t_reply( $g['fail'], array( 'error' => array( 'errors' => array( array( 'reason' => 'backendError' ) ) ) ) ); }
+	if ( $g['fail'] ) { return t_reply( $g['fail'], array( 'error' => array( 'errors' => array( array( 'reason' => $g['fail_reason'] ) ) ) ) ); }
 	if ( ! preg_match( '#/calendars/([^/]+)/events(?:/([^?]+))?(?:\?(.*))?$#', $url, $m ) ) { return t_reply( 400, array() ); }
 	$cal = rawurldecode( $m[1] );
 	if ( ! isset( $g['cals'][ $cal ] ) ) { return t_reply( 404, array( 'error' => array( 'errors' => array( array( 'reason' => 'notFound' ) ) ) ) ); }
