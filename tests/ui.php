@@ -7,6 +7,7 @@
  *
  * The form posts to the real meetlib_handle_request(). The "calendar" is a local placeholder page.
  * Add ?fail=1 to the page address to make the server refuse submissions (to see the error state).
+ * Add ?empty=1 to / or /editor to preview a site with no saved librarians (the plugin's default).
  */
 
 error_reporting( E_ALL );
@@ -59,6 +60,13 @@ if ( '/wp-json/meet-a-librarian/v1/librarians' === $path && 'POST' === $_SERVER[
 }
 if ( '/wp-json/meet-a-librarian/v1/librarians' === $path ) {
 	if ( isset( $_GET['broken'] ) ) { http_response_code( 500 ); echo 'server error'; return true; }
+	// ?empty=1 on the page (or the editor) previews a site with no saved roster: the default is now empty.
+	if ( isset( $_GET['empty'] ) || false !== strpos( isset( $_SERVER['HTTP_REFERER'] ) ? $_SERVER['HTTP_REFERER'] : '', 'empty=1' ) ) {
+		delete_option( 'meetlib_librarians' );
+		header( 'Content-Type: application/json' );
+		echo json_encode( meetlib_public_roster() );
+		return true;
+	}
 	$was = is_file( $saved_file ) ? json_decode( (string) file_get_contents( $saved_file ), true ) : null;
 	if ( is_array( $was ) && $was ) { update_option( 'meetlib_librarians', $was ); meetlib_resolve_links(); }
 	$rows = meetlib_public_roster();
@@ -89,7 +97,7 @@ if ( '/fake-calendar' === $path ) {
 	return true;
 }
 if ( '/editor' === $path ) { // the wp-admin directory editor; ?loadfail=1 makes its list fail to load
-	$root = '/wp-json/meet-a-librarian/v1/librarians' . ( isset( $_GET['loadfail'] ) ? '?broken=1' : '' );
+	$root = '/wp-json/meet-a-librarian/v1/librarians' . ( isset( $_GET['loadfail'] ) ? '?broken=1' : ( isset( $_GET['empty'] ) ? '?empty=1' : '' ) );
 	echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Editor (local preview)</title></head><body style="padding:24px;font-family:sans-serif">'
 		. '<script>window.MEETLIB=' . json_encode( array( 'root' => $root, 'nonce' => 'x', 'pageUrl' => 'https://example.edu/meet/' ) ) . ';</script>'
 		. meetlib_editor_markup()

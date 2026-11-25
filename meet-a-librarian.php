@@ -257,39 +257,9 @@ function meetlib_maybe_resolve() {
  *  Data
  * ------------------------------------------------------------------ */
 
+/** The roster used when none has been saved: empty. Staff add their own librarians in the editor. */
 function meetlib_default() {
-	return array(
-		array(
-			'name'     => 'Jenny Castel',
-			'pronouns' => 'she/her',
-			'title'    => 'Instruction & Technology Librarian',
-			'liaison'  => 'Liaison to Social Sciences Division',
-			'email'    => 'castel_jenny@wheatoncollege.edu',
-			'photo'    => 'https://libapps.s3.amazonaws.com/customers/7342/images/Jenny2024.png',
-			'profile'  => 'https://researchguides.wheatoncollege.edu/prf.php?id=6ff91da0-5c6c-11ee-8db8-127d3674933b',
-			'booking'  => '',
-		),
-		array(
-			'name'     => 'Jodi Devine',
-			'pronouns' => 'she/her',
-			'title'    => 'Instruction & Design Librarian',
-			'liaison'  => 'Liaison to Sciences and Mathematics Division',
-			'email'    => 'devine_jodi@wheatoncollege.edu',
-			'photo'    => 'https://d2jv02qf7xgjwx.cloudfront.net/customers/7342/images/Jodi.png',
-			'profile'  => 'https://researchguides.wheatoncollege.edu/prf.php?account_id=424182',
-			'booking'  => '',
-		),
-		array(
-			'name'     => 'Cary Gouldin',
-			'pronouns' => 'she/her',
-			'title'    => 'Humanities & Student Success Librarian',
-			'liaison'  => 'Liaison to Humanities and Creative Arts Division',
-			'email'    => 'gouldin_cary@wheatoncollege.edu',
-			'photo'    => 'https://libapps.s3.amazonaws.com/customers/7342/images/Cary2024.png',
-			'profile'  => 'https://researchguides.wheatoncollege.edu/prf.php?account_id=205782',
-			'booking'  => '',
-		),
-	);
+	return array();
 }
 
 function meetlib_get() {
@@ -368,7 +338,7 @@ add_action( 'rest_api_init', function () {
 
 /**
  * Save the roster from the editor. An empty roster is refused: the editor sends one when its list
- * failed to load, and saving it would replace every booking link with the blank defaults. The
+ * failed to load, and saving it would wipe every librarian and booking link. The
  * previous roster is kept in MEETLIB_BACKUP_OPTION (last 5) and can be restored from the editor page.
  */
 function meetlib_save_roster( WP_REST_Request $req ) {

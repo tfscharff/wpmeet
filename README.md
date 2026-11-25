@@ -16,6 +16,8 @@ Appointments.
   full link behind each one so the calendar still appears on the page
 - A patron's attachment is emailed to the librarian and is not kept on the website
 - Deep-linkable per-librarian widget for embedding elsewhere
+- Starts empty: a new install lists no librarians until staff add their own under **Meet With a
+  Librarian**, and the patron page says so until then
 - No custom database tables — the roster lives in a WordPress option, requests in a private post type
 
 ## Install
@@ -85,7 +87,8 @@ php -S 127.0.0.1:8123 tests/ui.php
 ```
 
 The last command serves a local preview of the patron page at `http://127.0.0.1:8123/` and of
-the directory editor at `/editor`; add `?autotest=1` to run the scripted checks. `/attach?state=ask`
+the directory editor at `/editor`; add `?autotest=1` to run the scripted checks, and `?empty=1`
+to preview a site with no librarians saved. `/attach?state=ask`
 (or `done`, `already`, `failed`, `invalid`) previews the page behind the email link.
 
 ## License
