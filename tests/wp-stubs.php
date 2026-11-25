@@ -14,10 +14,10 @@ function t_reset() {
 	update_option( 'meetlib_gcal_key', json_encode( array( 'client_email' => 'svc@proj.iam.gserviceaccount.com', 'private_key' => 'x' ) ) );
 	set_transient( 'meetlib_gcal_token_' . md5( 'svc@proj.iam.gserviceaccount.com' ), 'tok', 3600 );
 	update_option( 'meetlib_librarians', array(
-		array( 'name' => 'Cary Gouldin', 'pronouns' => '', 'title' => '', 'liaison' => '', 'email' => 'cary@wheatoncollege.edu', 'photo' => '', 'profile' => '', 'booking' => 'https://calendar.google.com/calendar/appointments/schedules/AAA' ),
-		array( 'name' => 'Jodi Devine', 'pronouns' => '', 'title' => '', 'liaison' => '', 'email' => '', 'photo' => '', 'profile' => '', 'booking' => 'https://calendar.app.google/short' ),
+		array( 'name' => 'Example Librarian One', 'pronouns' => '', 'title' => '', 'liaison' => '', 'email' => 'librarian1@wheatoncollege.edu', 'photo' => '', 'profile' => '', 'booking' => 'https://calendar.google.com/calendar/appointments/schedules/AAA' ),
+		array( 'name' => 'Example Librarian Two', 'pronouns' => '', 'title' => '', 'liaison' => '', 'email' => '', 'photo' => '', 'profile' => '', 'booking' => 'https://calendar.app.google/short' ),
 	) );
-	$GLOBALS['T']['g']['cals']['cary@wheatoncollege.edu'] = array( 'role' => 'writer', 'tz' => 'America/New_York', 'events' => array() );
+	$GLOBALS['T']['g']['cals']['librarian1@wheatoncollege.edu'] = array( 'role' => 'writer', 'tz' => 'America/New_York', 'events' => array() );
 }
 
 class WP_Error {

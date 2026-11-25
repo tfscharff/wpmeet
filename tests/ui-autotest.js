@@ -55,7 +55,7 @@
     send();
     await until(function () { return $("#meetlib-alert").textContent !== ""; }, "server error shown");
     ok(/Too many requests/.test($("#meetlib-alert").textContent), "server's message is shown");
-    ok(!!$('#meetlib-alert a[href="mailto:cary@wheatoncollege.edu"]'), "error offers the librarian's email");
+    ok(!!$('#meetlib-alert a[href="mailto:librarian1@wheatoncollege.edu"]'), "error offers the librarian's email");
     ok(!$('#meetlib-f button[type="submit"]').disabled && !!$("#meetlib-lock"), "form usable again, calendar still locked");
 
     // Network down.
@@ -69,13 +69,13 @@
     window.fetch = function (u, o) { sentBody = o && o.body; return realFetch.apply(this, arguments); };
     send();
     await until(function () { return !$("#meetlib-lock"); }, "calendar unlocks after sending");
-    ok(sentBody && sentBody.get("email") === "student@wheatoncollege.edu" && sentBody.get("librarianSlug") === "cary-gouldin", "form data sent");
+    ok(sentBody && sentBody.get("email") === "student@wheatoncollege.edu" && sentBody.get("librarianSlug") === "example-librarian-one", "form data sent");
     ok(sentBody && sentBody.get("_wpnonce") === null && sentBody.get("meetlib_hp") === "", "no nonce, empty honeypot");
     ok(!$("#meetlib-cal-ctl").hasAttribute("aria-hidden") && !$("#meetlib-cal-ctl").hasAttribute("tabindex"), "calendar reachable after sending");
     ok($("#meetlib-alt").hidden === false, "fallback link shown after sending");
     ok(/student@wheatoncollege\.edu/.test($("#meetlib-form-body").textContent), "patron is told which email to book with");
     ok(document.activeElement === $("#meetlib-h3"), "focus moves to the calendar heading");
-    ok(!!sessionStorage.getItem("meetlib_sent_cary-gouldin"), "sent state remembered");
+    ok(!!sessionStorage.getItem("meetlib_sent_example-librarian-one"), "sent state remembered");
 
     // Reopen (as after a reload): still unlocked, no second form.
     books[0].click();
@@ -84,7 +84,7 @@
     // A second, different request.
     $("#meetlib-again").click();
     ok(!!$("#meetlib-lock") && !!$("#meetlib-f"), "'Send a different request' brings the form and lock back");
-    ok(!sessionStorage.getItem("meetlib_sent_cary-gouldin"), "remembered state cleared");
+    ok(!sessionStorage.getItem("meetlib_sent_example-librarian-one"), "remembered state cleared");
 
     // A 200 reply that is not JSON still counts as sent.
     fill("student@wheatoncollege.edu");
