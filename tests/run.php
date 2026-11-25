@@ -476,5 +476,261 @@ meetlib_notify( $id );
 has( last_mail()['body'], 'booked as old@gmail.com', '36 pre-2.6 hints still listed' );
 lacks( last_mail()['body'], '/attach?', '36 pre-2.6 hints have no link' );
 
+// 37. The roster whitelist with junk input: only named rows survive, only the 8 fields, tags stripped.
+eq( meetlib_sanitize( 'not a list' ), array(), '37 a string is no roster' );
+eq( meetlib_sanitize( null ), array(), '37 null is no roster' );
+eq( meetlib_sanitize( 5 ), array(), '37 a number is no roster' );
+$rows = meetlib_sanitize( array(
+	'k1' => array( 'name' => "  <b>Ann</b>\t  Lee ", 'email' => ' ann@wheatoncollege.edu ', 'role' => 'administrator', 'embed' => 'https://evil.example/' ),
+	'junk', 7, null,
+	array( 'name' => '<br>' ),
+	array( 'title' => 'No name at all' ),
+	array( 'name' => array( 'x' ) ),
+	array( 'name' => 42 ),
+) );
+eq( count( $rows ), 2, '37 rows without a usable name are dropped' );
+eq( array_keys( $rows ), array( 0, 1 ), '37 rows are renumbered' );
+eq( array_keys( $rows[0] ), array( 'name', 'pronouns', 'title', 'liaison', 'email', 'photo', 'profile', 'booking' ), '37 exactly the 8 roster fields, unknown keys dropped' );
+eq( $rows[0]['name'], 'Ann Lee', '37 tags stripped and spaces collapsed in the name' );
+eq( $rows[0]['email'], 'ann@wheatoncollege.edu', '37 email trimmed' );
+eq( $rows[0]['booking'], '', '37 missing fields are empty' );
+eq( $rows[1]['name'], '42', '37 a numeric name is kept as text' );
+t_reset();
+$before = get_option( 'meetlib_librarians' );
+foreach ( array( 'not a list' => array( 'librarians' => 'Ann' ), 'missing' => array( 'pageUrl' => 'https://x.example/' ) ) as $what => $body ) {
+	$r = meetlib_save_roster( new WP_REST_Request( $body ) );
+	eq( is_wp_error( $r ) ? $r->get_error_code() : '', 'meetlib_bad_data', "37 save refuses: $what" );
+}
+eq( get_option( 'meetlib_librarians' ), $before, '37 roster unchanged after junk saves' );
+eq( get_option( 'meetlib_page_url' ), false, '37 page URL not saved by a refused save' );
+meetlib_save_roster( new WP_REST_Request( array( 'librarians' => array( array( 'name' => 'Ann' ) ), 'pageUrl' => '  https://lib.example/meet/  ' ) ) );
+eq( get_option( 'meetlib_page_url' ), 'https://lib.example/meet/', '37 page URL saved trimmed' );
+
+// 38. REST permissions: only saving the directory needs a login (edit_pages); the rest are public by design.
+t_reset();
+$GLOBALS['T_routes'] = array();
+call_user_func( t_hook( 'rest_api_init' ) );
+eq( array_keys( $GLOBALS['T_routes'] ), array( 'GET meet-a-librarian/v1/librarians', 'POST meet-a-librarian/v1/librarians', 'POST meet-a-librarian/v1/request', 'GET meet-a-librarian/v1/attach', 'POST meet-a-librarian/v1/attach' ), '38 exactly these routes' );
+$perm = function ( $route ) { return call_user_func( $GLOBALS['T_routes'][ $route ]['permission_callback'] ); };
+foreach ( array( 'none' => array(), 'subscriber' => array( 'read' ), 'author' => array( 'read', 'edit_posts', 'publish_posts' ) ) as $who => $caps ) {
+	$GLOBALS['T_caps'] = $caps;
+	eq( $perm( 'POST meet-a-librarian/v1/librarians' ), false, "38 $who cannot save the directory" );
+	eq( $perm( 'GET meet-a-librarian/v1/librarians' ), true, "38 $who can read the directory" );
+	eq( $perm( 'POST meet-a-librarian/v1/request' ), true, "38 $who can send the form" );
+	eq( $perm( 'GET meet-a-librarian/v1/attach' ), true, "38 $who can open an email link (the key is the permission)" );
+}
+$GLOBALS['T_caps'] = array( 'read', 'edit_posts', 'edit_pages' );
+eq( $perm( 'POST meet-a-librarian/v1/librarians' ), true, '38 an editor can save the directory' );
+eq( $GLOBALS['T_routes']['POST meet-a-librarian/v1/librarians']['callback'], 'meetlib_save_roster', '38 the save route is the roster save' );
+$GLOBALS['T_caps'] = array();
+
+// 39. The public directory (GET /librarians) carries the 8 roster fields plus `embed`, and nothing else.
+t_reset();
+meetlib_save_roster( new WP_REST_Request( array( 'librarians' => array(
+	array( 'name' => 'Ann', 'email' => 'ann@wheatoncollege.edu', 'booking' => 'https://calendar.google.com/calendar/appointments/schedules/AAA', 'notes' => 'private note', 'key' => 'secret' ),
+) ) ) );
+$id = submit( 600, array( 'librarianSlug' => 'ann' ) );
+meetlib_attach_key( $id );
+meetlib_gcal_flag( CAL, 'flag message' );
+$pub = call_user_func( $GLOBALS['T_routes']['GET meet-a-librarian/v1/librarians']['callback'] );
+eq( $pub, meetlib_public_roster(), '39 the route serves meetlib_public_roster()' );
+eq( array_keys( $pub[0] ), array( 'name', 'pronouns', 'title', 'liaison', 'email', 'photo', 'profile', 'booking', 'embed' ), '39 only the roster fields and embed' );
+$json = json_encode( $pub );
+foreach ( array( 'private note', 'secret', 'private_key', 'svc@proj', get_post_meta( $id, '_meetlib_attach_key', true ), STU, 'flag message' ) as $x ) {
+	lacks( $json, $x, '39 public directory does not leak' );
+}
+
+// 40. A stale nonce from an old cached page is ignored for the form route only.
+$err = new WP_Error( 'rest_cookie_invalid_nonce', 'Cookie check failed.' );
+$_SERVER['REQUEST_URI'] = '/wp-json/meet-a-librarian/v1/request';
+eq( meetlib_rest_stale_nonce( $err ), true, '40 stale nonce on the form route becomes anonymous' );
+ok( meetlib_rest_stale_nonce( new WP_Error( 'rest_forbidden', 'x' ) ) instanceof WP_Error, '40 other errors on the form route are kept' );
+eq( meetlib_rest_stale_nonce( null ), null, '40 no error stays no error' );
+foreach ( array( '/wp-json/meet-a-librarian/v1/librarians', '/wp-json/meet-a-librarian/v1/attach', '/wp-json/wp/v2/users' ) as $uri ) {
+	$_SERVER['REQUEST_URI'] = $uri;
+	ok( meetlib_rest_stale_nonce( $err ) === $err, "40 stale nonce still refused on $uri" );
+}
+$_SERVER['REQUEST_URI'] = '/index.php';
+$GLOBALS['wp'] = (object) array( 'query_vars' => array( 'rest_route' => '/meet-a-librarian/v1/request' ) );
+eq( meetlib_rest_stale_nonce( $err ), true, '40 also for ?rest_route= addresses' );
+unset( $GLOBALS['wp'], $_SERVER['REQUEST_URI'] );
+
+// 41. Admin actions refuse a user without the capability before doing anything.
+t_reset();
+$GLOBALS['T_caps'] = array( 'read', 'edit_posts', 'edit_pages' ); // an editor, not an administrator
+$_POST = array( 'meetlib_gcal_remove' => '1' );
+$_GET  = array( 'i' => '0' );
+update_option( 'meetlib_librarians_backup', array( array( 't' => 1, 'by' => '', 'rows' => array( array( 'name' => 'Old' ) ), 'page' => '' ) ) );
+$key_before = get_option( 'meetlib_gcal_key' );
+foreach ( array( 'admin_post_meetlib_gcal_save', 'admin_post_meetlib_gcal_run', 'admin_post_meetlib_purge_files' ) as $hook ) {
+	$died = '';
+	try { call_user_func( t_hook( $hook ) ); } catch ( Exception $e ) { $died = $e->getMessage(); }
+	has( $died, 'Not allowed', "41 an editor is refused: $hook" );
+}
+eq( get_option( 'meetlib_gcal_key' ), $key_before, '41 the Calendar key is not removed by an editor' );
+$GLOBALS['T_caps'] = array( 'read' );
+$roster_before = get_option( 'meetlib_librarians' );
+$died = '';
+try { call_user_func( t_hook( 'admin_post_meetlib_restore' ) ); } catch ( Exception $e ) { $died = $e->getMessage(); }
+has( $died, 'Not allowed', '41 a subscriber cannot restore an earlier directory' );
+eq( get_option( 'meetlib_librarians' ), $roster_before, '41 directory unchanged' );
+$GLOBALS['T_caps'] = array(); $_POST = array(); $_GET = array();
+
+// 42. Form validation at its edges.
+t_reset();
+ok( ! is_wp_error( meetlib_handle_request( form( array( 'email' => 'Student@WheatonCollege.EDU' ) ) ) ), '42 the email domain is not case-sensitive' );
+ok( ! is_wp_error( meetlib_handle_request( form( array( 'email' => 'x@wheatonma.edu', 'due' => '' ) ) ) ), '42 the second domain is accepted and due is optional' );
+foreach ( array( 'x@evil.wheatoncollege.edu.com', 'x@notwheatoncollege.edu', 'x@sub.wheatoncollege.edu', 'x@wheatoncollege.edu@gmail.com', 'wheatoncollege.edu' ) as $e ) {
+	ok( is_wp_error( meetlib_handle_request( form( array( 'email' => $e ) ) ) ), "42 refuses $e" );
+}
+ok( is_wp_error( meetlib_handle_request( form( array( 'course' => '' ) ) ) ), '42 course is required' );
+ok( is_wp_error( meetlib_handle_request( form( array( 'meeting' => 'on zoom' ) ) ) ), '42 meeting option must match exactly' );
+t_reset();
+ok( ! is_wp_error( meetlib_handle_request( form( array( 'course' => str_repeat( 'x', 500 ) ) ) ) ), '42 a 500-character answer is accepted (300 + slack)' );
+eq( is_wp_error( $r = meetlib_handle_request( form( array( 'course' => str_repeat( 'y', 501 ) ) ) ) ) ? $r->get_error_code() : '', 'meetlib_long', '42 a 501-character answer is refused' );
+ok( ! is_wp_error( meetlib_handle_request( form( array( 'help' => str_repeat( 'h', 5200 ) ) ) ) ), '42 a 5200-character long answer is accepted' );
+ok( is_wp_error( meetlib_handle_request( form( array( 'help' => str_repeat( 'i', 5201 ) ) ) ) ), '42 a 5201-character long answer is refused' );
+if ( function_exists( 'mb_strlen' ) ) {
+	ok( ! is_wp_error( meetlib_handle_request( form( array( 'course' => str_repeat( 'é', 500 ) ) ) ) ), '42 length counts characters, not bytes' );
+}
+t_reset();
+$_SERVER['REMOTE_ADDR'] = '10.0.0.1';
+$blocked = 0;
+for ( $i = 0; $i < 31; $i++ ) {
+	$r = meetlib_handle_request( form( array( 'email' => "s$i@wheatoncollege.edu" ) ) );
+	if ( is_wp_error( $r ) ) { $blocked = $i + 1; break; }
+}
+eq( $blocked, 31, '42 the 31st request from one IP in 10 minutes is refused' );
+eq( count( $GLOBALS['T']['posts'] ), 30, '42 the refused one is not stored' );
+unset( $_SERVER['REMOTE_ADDR'] );
+
+// 43. Google errors: a rate limit is temporary even as HTTP 403; a refused key or a 401 is a setup problem.
+eq( meetlib_gcal_fail_kind( new WP_Error( 'meetlib_gcal_http', 'x', array( 'status' => 403, 'reason' => 'rateLimitExceeded' ) ) ), 'error', '43 403 rate limit is temporary' );
+eq( meetlib_gcal_fail_kind( new WP_Error( 'meetlib_gcal_http', 'x', array( 'status' => 403, 'reason' => 'quotaExceeded' ) ) ), 'error', '43 403 quota is temporary' );
+eq( meetlib_gcal_fail_kind( new WP_Error( 'meetlib_gcal_http', 'x', array( 'status' => 403, 'reason' => 'forbidden' ) ) ), 'no_access', '43 403 forbidden is a sharing problem' );
+eq( meetlib_gcal_fail_kind( new WP_Error( 'meetlib_gcal_http', 'x', array( 'status' => 429, 'reason' => '' ) ) ), 'error', '43 429 is temporary' );
+eq( meetlib_gcal_fail_kind( new WP_Error( 'http_request_failed', 'cURL error 28' ) ), 'error', '43 a network error is temporary' );
+eq( meetlib_gcal_fail_kind( new WP_Error( 'meetlib_gcal_auth', 'x' ) ), 'no_access', '43 a rejected key is a setup problem' );
+t_reset();
+$id = submit( 300 );
+$GLOBALS['T']['g']['fail'] = 403; $GLOBALS['T']['g']['fail_reason'] = 'rateLimitExceeded';
+meetlib_gcal_retry( $id );
+eq( st( $id ), 'pending', '43 rate-limited check keeps waiting' );
+ok( ! meetlib_gcal_flagged( CAL ), '43 rate limit does not flag the calendar' );
+t_reset();
+$id = submit( 300 );
+$GLOBALS['T']['g']['fail'] = 401;
+meetlib_gcal_retry( $id );
+eq( st( $id ), 'no_access', '43 a revoked token ends the wait' );
+eq( get_transient( 'meetlib_gcal_token_' . md5( 'svc@proj.iam.gserviceaccount.com' ) ), false, '43 a 401 drops the cached token' );
+eq( count( mails() ), 1, '43 emailed after 401' );
+
+// 44. Getting the token: a key Google rejects stops the wait; a sign-in outage keeps waiting.
+t_reset();
+delete_transient( 'meetlib_gcal_token_' . md5( 'svc@proj.iam.gserviceaccount.com' ) );
+$GLOBALS['T']['g']['token'] = array( 400, array( 'error' => 'invalid_grant', 'error_description' => 'Invalid JWT Signature.' ) );
+$id = submit( 300 );
+t_event( CAL, 'book1', $now - 200, STU );
+meetlib_gcal_retry( $id );
+eq( st( $id ), 'no_access', '44 a rejected key ends the wait' );
+eq( t_desc( CAL, 'book1' ), '', '44 nothing written with a rejected key' );
+eq( count( mails() ), 1, '44 librarian emailed' );
+$p = meetlib_gcal_problems();
+has( isset( $p[ CAL ]['msg'] ) ? $p[ CAL ]['msg'] : '', 'Invalid JWT Signature.', '44 Google\'s reason is kept for the admin warning' );
+t_reset();
+delete_transient( 'meetlib_gcal_token_' . md5( 'svc@proj.iam.gserviceaccount.com' ) );
+$GLOBALS['T']['g']['token'] = array( 503, array() );
+$id = submit( 300 );
+meetlib_gcal_retry( $id );
+eq( st( $id ), 'pending', '44 sign-in outage keeps waiting' );
+ok( ! meetlib_gcal_flagged( CAL ), '44 sign-in outage does not flag' );
+$GLOBALS['T']['g']['token'] = null;
+t_event( CAL, 'book1', $now - 200, STU );
+meetlib_gcal_retry( $id, true );
+eq( st( $id ), 'added', '44 found once sign-in works' );
+eq( get_transient( 'meetlib_gcal_token_' . md5( 'svc@proj.iam.gserviceaccount.com' ) ), 'tok', '44 the new token is cached' );
+
+// 45. Email retries: the attachment rides along on the first two attempts only; after 5 failures it stops but stays visible.
+function t_held_file() {
+	$dir = sys_get_temp_dir() . '/meetlib-private/' . bin2hex( random_bytes( 8 ) );
+	mkdir( $dir, 0777, true );
+	file_put_contents( $dir . '/brief.pdf', 'x' );
+	return $dir . '/brief.pdf';
+}
+foreach ( array( 1 => true, 2 => false ) as $nfail => $attached ) { // not $fails: that is the global failure counter
+	t_reset();
+	update_option( 'meetlib_gcal_key', '' );
+	$GLOBALS['T']['mail_ok'] = false;
+	$id = submit( 0 );
+	$file = t_held_file();
+	update_post_meta( $id, '_meetlib_file', $file );
+	update_post_meta( $id, '_meetlib_file_name', 'brief.pdf' );
+	update_post_meta( $id, '_meetlib_mail_fails', $nfail );
+	$GLOBALS['T']['mail_ok'] = true;
+	ok( meetlib_notify( $id ), "45 sent after $nfail failure(s)" );
+	eq( last_mail()['attach'], $attached ? array( $file ) : array(), "45 after $nfail failure(s) the file is " . ( $attached ? 'attached' : 'left off' ) );
+	has( last_mail()['body'], $attached ? 'brief.pdf (attached to this email)' : 'brief.pdf (this file could not be emailed', "45 after $nfail failure(s) the email says so" );
+	ok( ! is_file( $file ), "45 after $nfail failure(s) the file is deleted once sent" );
+	eq( get_post_meta( $id, '_meetlib_file', true ), '', "45 after $nfail failure(s) the path is cleared" );
+}
+t_reset();
+update_option( 'meetlib_gcal_key', '' );
+$GLOBALS['T']['mail_ok'] = false;
+$id = submit( 0 );
+$file = t_held_file();
+update_post_meta( $id, '_meetlib_file', $file );
+update_post_meta( $id, '_meetlib_file_name', 'brief.pdf' );
+for ( $i = 0; $i < 4; $i++ ) { meetlib_notify( $id ); }
+eq( (int) get_post_meta( $id, '_meetlib_mail_fails', true ), 5, '45 five attempts counted' );
+eq( get_post_meta( $id, '_meetlib_mail_next', true ), '', '45 no sixth attempt is scheduled' );
+ok( ! is_file( $file ), '45 the held file is deleted after the last attempt' );
+has( meetlib_status_short( $id ), 'EMAIL FAILED', '45 the list shows the failure' );
+ok( (bool) preg_grep( '/could not be emailed/', meetlib_health() ), '45 the admin warning stays' );
+$GLOBALS['T']['mail_ok'] = true;
+meetlib_sweep( 3, true );
+eq( count( mails() ), 0, '45 the sweep does not retry after the last attempt' );
+
+// 46. Appointment times: event zone over calendar zone, bad zones and dates, summer time.
+eq( meetlib_gcal_when( array( 'dateTime' => '2026-07-01T16:00:00Z' ), 'America/New_York' ), 'Wednesday, July 1 at 12:00 pm', '46 summer time in the calendar zone' );
+eq( meetlib_gcal_when( array( 'dateTime' => '2026-11-13T16:00:00Z', 'timeZone' => 'America/Los_Angeles' ), 'America/New_York' ), 'Friday, November 13 at 8:00 am', '46 the event\'s own zone wins' );
+eq( meetlib_gcal_when( array( 'dateTime' => '2026-11-13T16:00:00Z', 'timeZone' => 'Not/AZone' ), 'America/New_York' ), 'Friday, November 13 at 11:00 am', '46 an unknown event zone falls back to the calendar\'s' );
+eq( meetlib_gcal_when( array( 'dateTime' => '2026-11-13T16:00:00Z' ), 'Not/AZone' ), 'Friday, November 13 at 4:00 pm', '46 an unknown calendar zone falls back to the offset' );
+eq( meetlib_gcal_when( array( 'dateTime' => 'not a date' ), 'America/New_York' ), 'not a date', '46 an unreadable time is shown as sent' );
+eq( meetlib_gcal_when( array( 'date' => 'garbage' ) ), 'garbage', '46 an unreadable all-day date is shown as sent' );
+eq( meetlib_gcal_when( 'junk' ), '', '46 a non-array start is empty' );
+
+// 47. Patron and Google text is escaped where it becomes HTML: the event description and the email-link page.
+$h = meetlib_gcal_details_html( array( 'email' => STU, 'help' => "line one\n<img src=x onerror=alert(1)>", 'course' => 'A & B', 'due' => '  ', 'meeting' => 'On Zoom' ), 'f"<.pdf (sent to you by email)' );
+lacks( $h, '<img', '47 description: tags in answers are escaped' );
+has( $h, '&lt;img src=x onerror=alert(1)&gt;', '47 description: escaped text is kept' );
+has( $h, 'line one<br>', '47 description: line breaks become <br>' );
+has( $h, 'A &amp; B', '47 description: ampersand escaped' );
+has( $h, '<b>Assignment due:</b> (none given)', '47 description: blank answer shown as none given' );
+has( $h, 'f&quot;&lt;.pdf', '47 description: attachment name escaped' );
+$page = meetlib_attach_page( array( 'state' => 'ask', 'msg' => '', 'email' => '<b>e</b>@x', 'help' => '<script>x</script>' . str_repeat( 'z', 400 ), 'when' => '<i>w</i>', 'as' => '"><svg onload=1>', 'link' => '' ), 'https://example.edu/a' );
+foreach ( array( '<script>', '<svg', '<i>w', '<b>e' ) as $x ) { lacks( $page, $x, '47 attach page escapes ' . $x ); }
+has( $page, '&quot;&gt;&lt;svg onload=1&gt;', '47 attach page shows the booking address as text' );
+if ( function_exists( 'mb_strlen' ) ) { // the page only shortens when mbstring is loaded
+	has( $page, str_repeat( 'z', 50 ) . '…', '47 attach page shortens a long question' );
+	lacks( $page, str_repeat( 'z', 300 ), '47 attach page does not show all of it' );
+}
+
+// 48. Slugs (must match slug() in both JS blocks: ASCII only, runs of anything else become one hyphen).
+eq( meetlib_slug( "  Dr. Jane O'Brien-Smith " ), 'dr-jane-o-brien-smith', '48 punctuation and spaces' );
+eq( meetlib_slug( 'José Núñez' ), 'jos-n-ez', '48 non-ASCII letters are separators, as in JS' );
+eq( meetlib_slug( '---' ), '', '48 nothing left' );
+eq( meetlib_slug( null ), '', '48 null' );
+
+// 49. Earlier versions: the last 5 replaced rosters are kept, newest first; saving the same roster adds none.
+t_reset();
+for ( $i = 1; $i <= 7; $i++ ) { meetlib_save_roster( new WP_REST_Request( array( 'librarians' => array( array( 'name' => "P$i" ) ) ) ) ); }
+$bk = get_option( 'meetlib_librarians_backup' );
+eq( count( $bk ), 5, '49 five versions kept' );
+eq( $bk[0]['rows'][0]['name'], 'P6', '49 newest first' );
+eq( $bk[4]['rows'][0]['name'], 'P2', '49 oldest kept is five saves back' );
+eq( $bk[0]['by'], 'tester', '49 records who saved' );
+meetlib_save_roster( new WP_REST_Request( array( 'librarians' => array( array( 'name' => 'P7' ) ) ) ) );
+eq( get_option( 'meetlib_librarians_backup' ), $bk, '49 saving an unchanged roster adds no version' );
+
 echo $GLOBALS['fails'] ? "\n{$GLOBALS['fails']} FAILED, {$GLOBALS['passes']} passed\n" : "All {$GLOBALS['passes']} checks passed\n";
 exit( $GLOBALS['fails'] ? 1 : 0 );
